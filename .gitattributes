@@ -1,0 +1,5 @@
+CLAUDE.md export-ignore
+docs/superpowers/ export-ignore
+docs/morning-status-*.md export-ignore
+docs/overnight-workplan-*.md export-ignore
+scripts/sync-public.sh export-ignore

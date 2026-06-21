@@ -1,0 +1,106 @@
+/* Non-working day shading on the time scale.
+ * Applied to cells where the calendar has no working intervals for the
+ * given date (weekends + holiday exceptions). Construction PMs expect
+ * to see at a glance which days the crew is on site. */
+.construction-gantt-non-working {
+  background: rgba(241, 245, 249, 0.65);
+}
+
+/* Today-line marker. Red 2px vertical line; high-priority visual cue for
+ * what the date cursor is on. */
+.construction-gantt-marker-today {
+  background: #ef4444;
+  color: #ffffff;
+  font-weight: 600;
+}
+
+/* Generic milestone marker (council inspections, payment-claim dates,
+ * handover gates). Blue, less aggressive than today. */
+.construction-gantt-marker-milestone {
+  background: #2563eb;
+  color: #ffffff;
+  font-weight: 500;
+}
+
+/* Phantom baseline-row styling. Each row gets `.construction-gantt-baseline-ghost`
+ * plus a `.construction-gantt-baseline-${N}` class identifying WHICH baseline.
+ * Consumers override colours by re-declaring `.construction-gantt-baseline-N` with
+ * higher specificity or `!important`. */
+.construction-gantt-baseline-ghost {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 60%;
+  margin-top: 15%;
+  padding: 0 8px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-style: italic;
+  color: #ffffff;
+  opacity: 0.85;
+  white-space: nowrap;
+}
+
+/* Per-baseline palette. Picked for distinguishability + colourblind-
+ * friendly ordering: greys → cool blues → warm reds for higher indices.
+ * Consumers override by re-declaring with higher specificity or `!important`.
+ *
+ * Lighter backgrounds (amber, lime, cyan, teal, orange) override the default
+ * white text to slate `#0f172a` so the small italic label remains legible
+ * (WCAG AA 4.5:1 for small text). Darker backgrounds keep the ghost rule's
+ * white text. */
+.construction-gantt-baseline-0  { background: #6b7280; }  /* gray */
+.construction-gantt-baseline-1  { background: #3b82f6; }  /* blue */
+.construction-gantt-baseline-2  { background: #8b5cf6; }  /* violet */
+.construction-gantt-baseline-3  { background: #14b8a6; color: #0f172a; }  /* teal */
+.construction-gantt-baseline-4  { background: #f59e0b; color: #0f172a; }  /* amber */
+.construction-gantt-baseline-5  { background: #ec4899; }  /* pink */
+.construction-gantt-baseline-6  { background: #06b6d4; color: #0f172a; }  /* cyan */
+.construction-gantt-baseline-7  { background: #84cc16; color: #0f172a; }  /* lime */
+.construction-gantt-baseline-8  { background: #f97316; color: #0f172a; }  /* orange */
+.construction-gantt-baseline-9  { background: #a855f7; }  /* purple */
+.construction-gantt-baseline-10 { background: #dc2626; }  /* red */
+
+/* Edit preview ghost bar — shows live CPM cascade preview while editing.
+ * Matches baseline ghost sizing (60% height, 15% top margin) so preview
+ * phantoms read as secondary/tentative alongside the live bar. */
+.construction-gantt-edit-preview {
+  height: 60%;
+  margin-top: 15%;
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(59, 130, 246, 0.35) 0px,
+    rgba(59, 130, 246, 0.35) 6px,
+    rgba(59, 130, 246, 0.15) 6px,
+    rgba(59, 130, 246, 0.15) 12px
+  );
+  border: 1.5px dashed rgba(59, 130, 246, 0.7);
+  border-radius: 3px;
+  pointer-events: none;
+}
+
+/* Drag handle — appears at right edge of task bar in editMode */
+.construction-gantt-drag-handle {
+  position: absolute;
+  right: -5px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: rgba(59, 130, 246, 0.85);
+  cursor: crosshair;
+  opacity: 0;
+  transition: opacity 0.15s;
+  z-index: 10;
+}
+
+.wx-task:hover .construction-gantt-drag-handle {
+  opacity: 1;
+}
+
+/* Deadline overrun — sectional-completion slippage (NZS 3910). */
+.construction-gantt-deadline-missed {
+  outline: 2px solid #dc2626;
+  outline-offset: -2px;
+}

@@ -1,0 +1,89 @@
+{
+  "name": "@pyraxi/gantt",
+  "version": "1.0.0",
+  "description": "Pyraxi Schedule — an MIT React Gantt that ships a real scheduling engine (not just a renderer). MS Project interop (MSPDI). Built for construction.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Euripides Cassels (Pyraxis)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Pyraxi/gantt.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/Pyraxi/gantt#readme",
+  "keywords": [
+    "react",
+    "gantt",
+    "construction",
+    "scheduling",
+    "msproject",
+    "primavera",
+    "svar"
+  ],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./export": {
+      "import": {
+        "types": "./dist/export/index.d.ts",
+        "default": "./dist/export/index.js"
+      },
+      "require": {
+        "types": "./dist/export/index.d.cts",
+        "default": "./dist/export/index.cjs"
+      }
+    }
+  },
+  "sideEffects": [
+    "**/*.css"
+  ],
+  "files": [
+    "dist",
+    "src",
+    "!src/**/*.test.ts",
+    "!src/**/*.test.tsx",
+    "!src/**/__fixtures__/**",
+    "README.md",
+    "LICENSE.md",
+    "CHANGELOG.md"
+  ],
+  "peerDependencies": {
+    "react": "^18.0.0 || ^19.0.0",
+    "react-dom": "^18.0.0 || ^19.0.0"
+  },
+  "dependencies": {
+    "@pyraxi/cpm-engine": "workspace:*",
+    "@svar-ui/react-core": "~2.5.0",
+    "@svar-ui/react-gantt": "~2.6.1",
+    "html-to-image": "^1.11.13",
+    "jspdf": "^2.5.2",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.3.2",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "bunchee": "^6.10.0",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "typescript": "^5.9.2"
+  },
+  "scripts": {
+    "build": "bunchee",
+    "dev": "bunchee --watch",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --project=unit"
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "name": "@pyraxi/cpm-engine",
+  "version": "1.0.0",
+  "description": "Pyraxi CPM Engine — headless construction scheduling engine: forward/backward critical-path pass, 8 MS Project constraint types, negative slack, working-time calendars, baselines, MSPDI interop. Pure TypeScript, framework-agnostic.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Euripides Cassels (Pyraxis)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Pyraxi/gantt.git",
+    "directory": "packages/engine"
+  },
+  "homepage": "https://github.com/Pyraxi/gantt#readme",
+  "keywords": [
+    "cpm",
+    "critical-path",
+    "scheduler",
+    "scheduling-engine",
+    "gantt",
+    "project",
+    "mspdi",
+    "nzs-3910"
+  ],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./__bench__/generate-project": {
+      "import": {
+        "types": "./src/__bench__/generate-project.ts",
+        "default": "./src/__bench__/generate-project.ts"
+      },
+      "require": {
+        "types": "./src/__bench__/generate-project.ts",
+        "default": "./src/__bench__/generate-project.ts"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "!src/**/*.test.ts",
+    "!src/**/*.test.tsx",
+    "!src/**/__fixtures__/**",
+    "README.md",
+    "LICENSE.md"
+  ],
+  "dependencies": {
+    "fast-xml-parser": "^4.5.6"
+  },
+  "devDependencies": {
+    "bunchee": "^6.10.0",
+    "typescript": "^5.9.2"
+  },
+  "scripts": {
+    "build": "bunchee",
+    "dev": "bunchee --watch",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  }
+}

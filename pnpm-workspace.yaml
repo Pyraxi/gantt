@@ -1,0 +1,7 @@
+packages:
+  - "packages/*"
+
+allowBuilds:
+  '@swc/core': true
+  core-js: false
+  esbuild: true
