@@ -50,6 +50,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useId,
   useImperativeHandle,
   useMemo,
   useRef,
@@ -77,6 +78,7 @@ import type {
   XlsxExportOptions,
 } from './export/types.js';
 import {
+  buildSignalCss,
   buildSvarTasks,
   formatShortDate,
   projectHasSplitTasks,
@@ -360,6 +362,10 @@ export const Gantt = forwardRef<GanttHandle, GanttProps>(function Gantt(
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
+  // Per-instance scope so the engine-signal stylesheet below only touches this
+  // Gantt's bars, never any sibling Gantt on the same page. useId yields a
+  // string with colons (":r0:"); strip them for a valid class name.
+  const ganttScopeClass = `cg-scope-${useId().replace(/:/g, '')}`;
   // SVAR calls init in a useEffect after first paint, so the IApi isn't
   // available on the first render. useState (not useRef) is required so that
   // setting the api triggers a re-render. Critically, the api-dependent chrome
@@ -435,6 +441,18 @@ export const Gantt = forwardRef<GanttHandle, GanttProps>(function Gantt(
   );
   const hasSplitTasks = useMemo(() => projectHasSplitTasks(scheduled.tasks), [scheduled.tasks]);
 
+  // Engine-signal stylesheet for the NATIVE bar path. SVAR renders clean Willow
+  // bars (label beside bar, two-tone) and tags each with `data-id=":<id>"` (its
+  // setID convention — the same selector SVAR uses internally). We recolour our
+  // engine's critical path and outline deadline overruns by overriding SVAR's
+  // own theme tokens on those bars — no custom template, so the native look and
+  // two-tone progress survive. Only emitted for the default native path; the
+  // edit-mode / baseline-ghost template paths draw their own signals.
+  const signalCss = useMemo(
+    () => (editMode || ghostBarsEnabled ? null : buildSignalCss(scheduled.tasks, ganttScopeClass)),
+    [scheduled.tasks, ganttScopeClass, editMode, ghostBarsEnabled],
+  );
+
   const svarTasks: ITask[] = useMemo(
     () =>
       buildSvarTasks(
@@ -486,6 +504,15 @@ export const Gantt = forwardRef<GanttHandle, GanttProps>(function Gantt(
   }, [columns, editMode, editState.activeCell]);
 
   const taskTemplate = useMemo(() => {
+    // Default: no template → SVAR renders its native Willow bars (clean two-tone
+    // capsule, label beside the bar, native progress). Critical-path is conveyed
+    // by SVAR's own `wx-critical` styling (driven by `task.critical` + the
+    // `criticalPath` prop below), so the clean default isn't repainted.
+    //
+    // A custom bar interior is only needed for the two opt-in modes that draw
+    // their own in-bar content: edit-mode (drag-to-link handle) and baseline
+    // ghost/variance overlays. Outside those, stay native.
+    if (!editMode && !ghostBarsEnabled) return undefined;
     if (!editMode) return ConstructionBar as FC<{ data: ITask }>;
     // Wrap ConstructionBar with a drag handle at the right edge of each task bar.
     const EditableBar: FC<{ data: SvarTaskWithComputed }> = ({ data }) => (
@@ -507,7 +534,7 @@ export const Gantt = forwardRef<GanttHandle, GanttProps>(function Gantt(
       </div>
     );
     return EditableBar as FC<{ data: ITask }>;
-  }, [editMode, onBarMouseDown]);
+  }, [editMode, ghostBarsEnabled, onBarMouseDown]);
 
   useImperativeHandle(
     ref,
@@ -687,6 +714,7 @@ export const Gantt = forwardRef<GanttHandle, GanttProps>(function Gantt(
     // biome-ignore lint/a11y/useKeyWithClickEvents: keyboard alternative (Delete key) is out of scope for v0.4; Escape already handled in drag listener
     <div
       ref={containerRef}
+      className={ganttScopeClass}
       style={{ position: 'relative', height }}
       onClick={
         editMode && onLinkDelete
@@ -707,6 +735,10 @@ export const Gantt = forwardRef<GanttHandle, GanttProps>(function Gantt(
           : undefined
       }
     >
+      {signalCss && (
+        // biome-ignore lint/security/noDangerouslySetInnerHtml: generated from our own task ids + fixed colour literals, no user HTML
+        <style dangerouslySetInnerHTML={{ __html: signalCss }} />
+      )}
       {toolbar && svarApi && (
         <SvarToolbar api={svarApi} {...(svarToolbarItems ? { items: svarToolbarItems } : {})} />
       )}

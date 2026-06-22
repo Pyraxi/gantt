@@ -1,5 +1,16 @@
 # @pyraxi/gantt
 
+## 1.0.1
+
+- **Cleaner default render — SVAR's native Willow bars.** The read-only default no
+  longer overrides the bar with a custom template (which re-implemented the label,
+  progress fill, and theme and produced a heavy look). It now renders SVAR's native
+  bars (label beside the bar, native two-tone). Engine signals are layered on instead
+  of repainting: the **critical path** and **deadline overruns** are styled by
+  overriding SVAR's own theme tokens on those bars (keyed on SVAR's `data-id`, scoped
+  per Gantt instance), so the native two-tone is preserved. Edit-mode and baseline
+  overlays keep their richer rendering. No public API change.
+
 ## 1.0.0
 
 First public release of Pyraxi Schedule — an MIT React Gantt that ships a real scheduling engine, not just a renderer.

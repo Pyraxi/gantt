@@ -1,6 +1,6 @@
 {
   "name": "@pyraxi/gantt",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Pyraxi Schedule — an MIT React Gantt that ships a real scheduling engine (not just a renderer). MS Project interop (MSPDI). Built for construction.",
   "type": "module",
   "license": "MIT",

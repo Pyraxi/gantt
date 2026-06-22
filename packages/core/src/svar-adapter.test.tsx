@@ -9,12 +9,24 @@
 import type { Calendar, Project, Task, TaskSegment } from '@pyraxi/cpm-engine';
 import { describe, expect, test } from 'vitest';
 import {
+  buildSignalCss,
   buildSvarTasks,
   projectHasSplitTasks,
   projectHasUnscheduledTasks,
   toSvarTask,
   toSvarZoom,
 } from './svar-adapter.js';
+
+const computed = (over: Partial<NonNullable<Task['computed']>> = {}) => ({
+  earlyStart: START,
+  earlyFinish: new Date(2026, 0, 5, 17, 0),
+  lateStart: START,
+  lateFinish: new Date(2026, 0, 5, 17, 0),
+  totalSlack: 0,
+  freeSlack: 0,
+  isCritical: false,
+  ...over,
+});
 
 // ---------------------------------------------------------------------------
 // toSvarZoom — named zoom level conversion (Task 3.2)
@@ -240,6 +252,68 @@ describe('toSvarTask — existing behavior', () => {
     });
     const result = toSvarTask(t, undefined, undefined);
     expect(result.is_critical).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildSignalCss — engine-signal stylesheet for the native bar path
+// ---------------------------------------------------------------------------
+
+describe('buildSignalCss', () => {
+  test('returns null when no task carries a signal', () => {
+    const tasks = [makeTask('a', { computed: computed() }), makeTask('b')];
+    expect(buildSignalCss(tasks, 'cg-scope-x')).toBeNull();
+  });
+
+  test('critical leaf task overrides SVAR task fill token, scoped + data-id keyed', () => {
+    const tasks = [makeTask('found', { computed: computed({ isCritical: true }) })];
+    const css = buildSignalCss(tasks, 'cg-scope-x');
+    // SVAR tags bars data-id=":<id>"; selector must be scoped to this instance
+    expect(css).toContain('.cg-scope-x .wx-bar[data-id=":found"]');
+    expect(css).toContain('--wx-gantt-task-fill-color:#de3a3a');
+    expect(css).not.toContain('summary');
+  });
+
+  test('targets both colon-prefixed (string id) and bare (numeric id) data-id forms', () => {
+    // SVAR setID: string ids → ":site", numeric ids → "5". Cover both.
+    const stringId = buildSignalCss(
+      [makeTask('site', { computed: computed({ isCritical: true }) })],
+      'cg-scope-x',
+    );
+    expect(stringId).toContain('[data-id=":site"]');
+    expect(stringId).toContain('[data-id="site"]');
+
+    const numericId = buildSignalCss(
+      [makeTask('5' as unknown as string, { computed: computed({ isCritical: true }) })],
+      'cg-scope-x',
+    );
+    expect(numericId).toContain('[data-id="5"]');
+  });
+
+  test('critical summary task overrides the summary tokens, not the task token', () => {
+    const tasks = [
+      makeTask('phase1', { type: 'summary', computed: computed({ isCritical: true }) }),
+    ];
+    const css = buildSignalCss(tasks, 'cg-scope-x') ?? '';
+    expect(css).toContain('--wx-gantt-summary-fill-color:#c32b64');
+    expect(css).not.toContain('--wx-gantt-task-fill-color');
+  });
+
+  test('deadline overrun adds an outline rule', () => {
+    const tasks = [makeTask('roof', { computed: computed({ deadlineMissed: true }) })];
+    const css = buildSignalCss(tasks, 'cg-scope-x') ?? '';
+    expect(css).toContain('.cg-scope-x .wx-bar[data-id=":roof"]');
+    expect(css).toContain('outline:2px solid #dc2626');
+  });
+
+  test('only critical/deadline tasks emit rules; clean tasks are skipped', () => {
+    const tasks = [
+      makeTask('crit', { computed: computed({ isCritical: true }) }),
+      makeTask('clean', { computed: computed() }),
+    ];
+    const css = buildSignalCss(tasks, 'cg-scope-x') ?? '';
+    expect(css).toContain(':crit"');
+    expect(css).not.toContain(':clean"');
   });
 });
 

@@ -361,6 +361,42 @@ function workingMinutesPerDay(calendar: Calendar): number {
   return 480;
 }
 
+/**
+ * Build the engine-signal stylesheet for the native (template-less) bar path.
+ *
+ * SVAR renders clean native Willow bars and tags each with `data-id=":<id>"`
+ * (its `setID` convention — the same selector SVAR uses internally). Rather than
+ * replace the bar with a custom template, we recolour our engine's critical path
+ * and outline deadline overruns by overriding SVAR's own theme tokens on those
+ * bars. The bar's two-tone (lighter track + darker progress fill) is preserved
+ * because the tokens drive those inner elements.
+ *
+ * `scopeClass` confines the rules to one Gantt instance. Returns null when
+ * there's nothing to style.
+ */
+export function buildSignalCss(tasks: Task[], scopeClass: string): string | null {
+  const rules: string[] = [];
+  for (const t of tasks) {
+    // SVAR's `setID` prefixes string ids with ':' (data-id=":site") but leaves
+    // numeric ids bare (data-id="5"). Target both so critical/deadline styling
+    // works regardless of the consumer's TaskId type.
+    const sel =
+      `.${scopeClass} .wx-bar[data-id=":${t.id}"],` +
+      `.${scopeClass} .wx-bar[data-id="${t.id}"]`;
+    if (t.computed?.isCritical) {
+      rules.push(
+        t.type === 'summary'
+          ? `${sel}{--wx-gantt-summary-fill-color:#c32b64;--wx-gantt-summary-color:#d9306f;}`
+          : `${sel}{--wx-gantt-task-fill-color:#de3a3a;--wx-gantt-task-color:#f3a9a9;}`,
+      );
+    }
+    if (t.computed?.deadlineMissed) {
+      rules.push(`${sel}{outline:2px solid #dc2626;outline-offset:1px;}`);
+    }
+  }
+  return rules.length > 0 ? rules.join('\n') : null;
+}
+
 export function toSvarTask(
   t: Task,
   baseline: Baseline | undefined,
