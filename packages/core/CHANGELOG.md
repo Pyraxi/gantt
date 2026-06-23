@@ -1,5 +1,13 @@
 # @pyraxi/gantt
 
+## 1.0.2
+
+- **Fix: toolbar / editor / context-menu chrome rendered unstyled** (items stacked vertically,
+  ballooning the header). SVAR ships CSS per component and we imported only the gantt-core
+  `style.css`, which omits the chrome packages' styles — including the toolbar's `display:flex`.
+  Now imports `@svar-ui/react-gantt/all.css`, which bundles the Toolbar / Editor / Menu styles
+  alongside the core. No API change.
+
 ## 1.0.1
 
 - **Cleaner default render — SVAR's native Willow bars.** The read-only default no

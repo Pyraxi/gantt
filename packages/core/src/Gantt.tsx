@@ -18,7 +18,11 @@ import {
   Tooltip as SvarTooltip,
   Willow as SvarWillow,
 } from '@svar-ui/react-gantt';
-import '@svar-ui/react-gantt/style.css';
+// `all.css` (not `style.css`) so the chrome components we expose — Toolbar,
+// ContextMenu, Editor — get their own styles. `style.css` is the gantt core
+// only and omits e.g. the toolbar's `display:flex`, which makes toolbar items
+// stack vertically and balloon the header. all.css bundles the chrome styles.
+import '@svar-ui/react-gantt/all.css';
 import { Locale as SvarLocale } from '@svar-ui/react-core';
 import './Gantt.css';
 import type {
