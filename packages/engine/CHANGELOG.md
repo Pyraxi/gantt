@@ -1,5 +1,22 @@
 # @pyraxi/cpm-engine
 
+## 1.2.5
+
+### Patch Changes
+
+- 537c686: The link-cycle error from `schedule()` / `topologicalSort()` now names every loop's tasks, e.g. `Link graph contains a cycle; topological sort is not possible — loops: [A1 → A2 → A1], [B1 → B2 → B1]`. A self-link shows as `[a → a]`. The message still starts with the old text, so code matching on it keeps working.
+- cb2d34f: **`CreateLinkCommand` now refuses a second link between the same two tasks** in the same direction, whatever its type, throwing `EditError` ("a link from a to b already exists"). Only one link per ordered pair is allowed, as in MS Project. To change an existing link's type or lag, use `UpdateLinkCommand`. Creating a link with an id that's already used still reports `duplicate link id`.
+- 537c686: **`schedule()` now throws on duplicate task ids**, naming them (`schedule(): duplicate task id "a"`), before scheduling anything. Before, a duplicated id silently gave every row with that id the same dates, or was misreported as a link cycle. `topologicalSort()` throws the same way (`topologicalSort(): duplicate task id "a"`). If you build projects from external data, de-duplicate ids first.
+- 537c686: **Free float values change.** A task with no successors (or whose successors are all unscheduled) now gets free float up to the project's early finish, never more than its total slack. Before, it was reported as `0`. This matches MS Project and P6. Tasks with constraining successors are unchanged.
+
+  `schedule()` measures long total and free float spans (60 days or more) with one cached working-time counter instead of walking day by day for each task. The values are the same; 5,000 unlinked 1–10-day tasks beside one 250-day task schedule in ~0.4 s on the test machine. `workingMinutesBetween` (and so `totalSlack` / `freeSlack`) now returns `0` instead of `-0` for a backward span with no working time in it, for example on a milestone at the end of a working day.
+
+- 92f7009: A calendar work interval whose end is at or before its start (inverted or zero-length) now counts as no working time everywhere working time is read. Before, it added negative time, so durations across such a day came out too long, and a default calendar made only of them made `schedule()` hang. Such a default calendar now throws the same "no working time" error as an empty one. The grid's minutes-per-day ignores these intervals too. `serializeMspdi` no longer writes these intervals, and a week day or working exception made only of them is written as non-working.
+
+  MSPDI import now reads a `ToTime` of `00:00:00` as the end of the day (minute 1440), as MS Project and MPXJ do. MS Project's "24 Hours" calendar (`00:00:00` to `00:00:00`) was otherwise read as zero-length, so it had no working time. `serializeMspdi` writes an interval ending at 1440 as `00:00:00`, so it round-trips.
+
+- f707d03: `schedule()` indexes links by endpoint once instead of scanning the full link list per task. Large schedules no longer scale quadratically: 5,000 tasks now take ~200 ms on a 2 GHz Xeon, down from ~1.7 s. Output is unchanged.
+
 ## 1.2.4
 
 ### Patch Changes

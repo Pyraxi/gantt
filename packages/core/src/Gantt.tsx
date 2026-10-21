@@ -126,6 +126,7 @@ import {
   toSvarZoom,
   workingMinutesPerDay,
 } from './svar-adapter.js';
+import { placesUnderHidden, reRootOrphans } from './visible-tree.js';
 
 // Engine factories the structural-commit path applies. Module-level + stable so
 // the intercept closure references one object across renders.
@@ -325,6 +326,13 @@ export interface GanttProps {
    * - empty set: render nothing.
    * - set containing ids not present in `project.tasks`: those ids are
    *   ignored; only matching tasks render.
+   * - a matching task whose parent is filtered out is drawn under its
+   *   nearest visible ancestor (or at the top level), never dropped; include
+   *   the summaries' ids in the set to keep them. Render-only: tooltips and
+   *   `render` columns see the drawn parent, and a drop or add that would
+   *   file a task under a filtered-out summary is refused (with
+   *   `onStructuralCommit`, and for `onTaskAdd`). The thin `onTaskIndent`
+   *   path is resolved by the host, so checking it is the host's job.
    *
    * Lifts the "filter-while-keeping-CPM-correct" domain rule that
    * consumer apps would otherwise have to write themselves. See
@@ -689,8 +697,14 @@ export const Gantt = forwardRef<GanttHandle, GanttProps>(function Gantt(
 
   // Visibility filter is render-only — applied AFTER schedule() has run so
   // computed fields on visible tasks reflect the full project. ADR-005.
+  const visibleTaskIdsRef = useRef(visibleTaskIds);
+  visibleTaskIdsRef.current = visibleTaskIds;
   const renderableTasks = useMemo(
-    () => filterTasksByVisibility(scheduled.tasks, visibleTaskIds),
+    // An orphan (parent filtered out) is re-rooted so it still renders.
+    () =>
+      visibleTaskIds === undefined
+        ? scheduled.tasks
+        : reRootOrphans(filterTasksByVisibility(scheduled.tasks, visibleTaskIds), scheduled.tasks),
     [scheduled.tasks, visibleTaskIds],
   );
 
@@ -1242,6 +1256,17 @@ export const Gantt = forwardRef<GanttHandle, GanttProps>(function Gantt(
                 // shows but the consumer never persists. Veto so the gesture
                 // visibly no-ops instead.
                 if (!result) return false;
+                // A filtered view (visibleTaskIds) re-roots orphaned rows, so a
+                // drop / add next to one can resolve under a summary the user
+                // can't see: refuse it rather than file work out of sight.
+                if (
+                  placesUnderHidden(
+                    result.changes,
+                    projectRef.current.tasks,
+                    visibleTaskIdsRef.current,
+                  )
+                )
+                  return false;
                 onStructuralCommitRef.current(result.changes, result.nextProject);
                 return false;
               }
@@ -1259,10 +1284,20 @@ export const Gantt = forwardRef<GanttHandle, GanttProps>(function Gantt(
                   if (!onTaskIndentRef.current) return true;
                   onTaskIndentRef.current(edit.id, edit.direction);
                   return false;
-                case 'add':
+                case 'add': {
                   if (!onTaskAddRef.current) return true;
-                  onTaskAddRef.current(edit.task, resolveAddPosition(projectRef.current, edit));
+                  const position = resolveAddPosition(projectRef.current, edit);
+                  if (
+                    placesUnderHidden(
+                      [{ parent: position.parent }],
+                      projectRef.current.tasks,
+                      visibleTaskIdsRef.current,
+                    )
+                  )
+                    return false;
+                  onTaskAddRef.current(edit.task, position);
                   return false;
+                }
                 default:
                   // 'reorder' (row drag-drop) has no thin onTask* equivalent —
                   // without onStructuralCommit it falls through to SVAR's native
@@ -1902,7 +1937,8 @@ function toSvarColumn(c: GanttColumn): IColumnConfig {
       const task = props.row as Task;
       const value = task[field as keyof Task];
       if (value === undefined || value === null) return <span />;
-      if (value instanceof Date) return <span>{value.toISOString().slice(0, 10)}</span>;
+      // Local date: an 08:00 NZ start is the previous day in UTC.
+      if (value instanceof Date) return <span>{formatShortDate(value)}</span>;
       return <span>{String(value)}</span>;
     };
   }

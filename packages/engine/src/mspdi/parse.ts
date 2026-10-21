@@ -873,9 +873,15 @@ function parseWorkingTimes(wd: Record<string, unknown>): WorkInterval[] {
     const wRec = w as Record<string, unknown>;
     const fromTime = String(wRec.FromTime ?? '');
     const toTime = String(wRec.ToTime ?? '');
+    const startMinutes = parseMspdiTime(fromTime);
+    const endMinutes = parseMspdiTime(toTime);
     intervals.push({
-      startMinutes: parseMspdiTime(fromTime),
-      endMinutes: parseMspdiTime(toTime),
+      startMinutes,
+      // A ToTime of midnight (never after FromTime) is the end of the day: MS
+      // Project's "24 Hours" calendar is 00:00:00 → 00:00:00, a shift to
+      // midnight 08:00:00 → 00:00:00 (MPXJ 16.4 reads them as 24 h and 16 h).
+      // Only a literal midnight: a missing / unreadable ToTime stays 0.
+      endMinutes: endMinutes === 0 && /^0?0:00:00$/.test(toTime) ? 1440 : endMinutes,
     });
   }
   return intervals;

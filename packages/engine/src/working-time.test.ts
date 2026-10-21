@@ -321,3 +321,140 @@ describe('isWorkingTime', () => {
     expect(isWorkingTime(MON(9), withHoliday)).toBe(false);
   });
 });
+
+describe('createWorkingMinutesCounter', () => {
+  test('agrees with workingMinutesBetween on random pairs (weekends, split shifts, exceptions)', async () => {
+    const { createWorkingMinutesCounter, workingMinutesBetween } = await import('./working-time');
+    const cal: Calendar = {
+      id: 'c',
+      name: 'C',
+      workWeek: [
+        [],
+        [
+          { startMinutes: 420, endMinutes: 720 },
+          { startMinutes: 780, endMinutes: 990 },
+        ],
+        [{ startMinutes: 480, endMinutes: 1020 }],
+        [{ startMinutes: 480, endMinutes: 1020 }],
+        [{ startMinutes: 480, endMinutes: 1020 }],
+        [{ startMinutes: 480, endMinutes: 900 }],
+        [{ startMinutes: 480, endMinutes: 720 }],
+      ],
+      exceptions: [
+        { date: new Date(2026, 0, 7), isWorking: false },
+        {
+          date: new Date(2026, 1, 3),
+          isWorking: true,
+          intervals: [{ startMinutes: 600, endMinutes: 660 }],
+        },
+        {
+          date: new Date(2026, 0, 11),
+          isWorking: true,
+          intervals: [{ startMinutes: 540, endMinutes: 600 }],
+        },
+      ],
+    };
+    const count = createWorkingMinutesCounter(cal);
+    let seed = 11;
+    const rnd = () => {
+      seed = (seed * 1103515245 + 12345) % 2 ** 31;
+      return seed / 2 ** 31;
+    };
+    const base = new Date(2026, 0, 1).getTime();
+    for (let i = 0; i < 2000; i++) {
+      const a = new Date(base + Math.floor(rnd() * 90 * 24 * 60) * 60_000);
+      const b = new Date(base + Math.floor(rnd() * 90 * 24 * 60) * 60_000);
+      expect(count(a, b)).toBeCloseTo(workingMinutesBetween(a, b, cal), 6);
+    }
+  });
+});
+
+describe('createWorkingMinutesCounter matches workingMinutesBetween exactly', () => {
+  // schedule() measures slack with the counter: it must give the identical
+  // number (sign and zero included), not just a close one.
+  const WK = [{ startMinutes: 480, endMinutes: 1020 }];
+  const calendars: Calendar[] = [
+    standardCalendar,
+    {
+      id: 'holidays',
+      name: 'Std + holidays + a Saturday shift',
+      workWeek: [[], WK, WK, WK, WK, WK, []],
+      exceptions: [
+        { date: new Date(2026, 0, 1), isWorking: false },
+        { date: new Date(2026, 0, 2), isWorking: false },
+        { date: new Date(2026, 3, 3), isWorking: false },
+        { date: new Date(2026, 3, 6), isWorking: false },
+        { date: new Date(2026, 3, 25), isWorking: false },
+        {
+          date: new Date(2026, 8, 26),
+          isWorking: true,
+          intervals: [{ startMinutes: 480, endMinutes: 720 }],
+        },
+        { date: new Date(2026, 11, 25), isWorking: false },
+      ],
+    },
+    {
+      id: 'split',
+      name: 'Split shift, six days',
+      workWeek: [
+        [],
+        [
+          { startMinutes: 420, endMinutes: 720 },
+          { startMinutes: 780, endMinutes: 1050 },
+        ],
+        WK,
+        WK,
+        WK,
+        WK,
+        [{ startMinutes: 480, endMinutes: 720 }],
+      ],
+      exceptions: [],
+    },
+    {
+      id: 'nights',
+      name: 'Late shift (across local DST changes)',
+      workWeek: Array.from({ length: 7 }, () => [{ startMinutes: 60, endMinutes: 1439 }]),
+      exceptions: [],
+    },
+  ];
+  const at = (y: number, m: number, d: number, h = 0, min = 0) => new Date(y, m, d, h, min);
+  // Includes reverse (negative) spans, spans inside non-working time, and
+  // spans across the NZ / EU / US DST changes of 2026.
+  const pairs: [Date, Date][] = [
+    [at(2026, 0, 5, 8), at(2026, 0, 5, 8)],
+    [at(2026, 0, 5, 8), at(2026, 0, 9, 17)],
+    [at(2026, 0, 9, 17), at(2026, 0, 5, 8)],
+    [at(2026, 0, 9, 17), at(2026, 0, 12, 8)], // weekend only
+    [at(2026, 0, 12, 8), at(2026, 0, 9, 17)], // reverse, weekend only
+    [at(2025, 11, 24, 12), at(2026, 0, 6, 9, 30)],
+    [at(2026, 0, 6, 9, 30), at(2025, 11, 24, 12)],
+    [at(2026, 2, 27, 10), at(2026, 3, 9, 15)], // EU spring forward, NZ Easter
+    [at(2026, 3, 9, 15), at(2026, 2, 27, 10)],
+    [at(2026, 8, 24, 13), at(2026, 9, 2, 11)], // NZ spring forward
+    [at(2026, 9, 23, 7), at(2026, 10, 3, 16)], // EU / US fall back
+    [at(2026, 0, 5, 8), at(2026, 11, 31, 17)], // a year
+    [at(2026, 11, 31, 17), at(2026, 0, 5, 8)],
+  ];
+  for (const cal of calendars) {
+    test(cal.name, async () => {
+      const { createWorkingMinutesCounter, workingMinutesBetween } = await import('./working-time');
+      const count = createWorkingMinutesCounter(cal);
+      for (const [a, b] of pairs) {
+        const want = workingMinutesBetween(a, b, cal);
+        const got = count(a, b);
+        expect(
+          Object.is(got, want),
+          `${a.toISOString()} → ${b.toISOString()}: ${got} vs ${want}`,
+        ).toBe(true);
+      }
+    });
+  }
+
+  test('a reverse span with no working time is 0, not -0', async () => {
+    const { createWorkingMinutesCounter, workingMinutesBetween } = await import('./working-time');
+    const fri17 = at(2026, 0, 9, 17);
+    const mon8 = at(2026, 0, 12, 8);
+    expect(Object.is(workingMinutesBetween(mon8, fri17, standardCalendar), 0)).toBe(true);
+    expect(Object.is(createWorkingMinutesCounter(standardCalendar)(mon8, fri17), 0)).toBe(true);
+  });
+});

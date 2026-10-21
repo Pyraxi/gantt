@@ -8,4 +8,4 @@
 // exceljs) into the server graph. Import from `@pyraxi/gantt/version` server-side;
 // `@pyraxi/gantt` still re-exports it for client-side convenience. Keep this
 // file import-free — any import here would defeat the server-safe subpath.
-export const VERSION = '1.7.4';
+export const VERSION = '1.7.6';

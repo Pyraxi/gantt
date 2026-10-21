@@ -218,6 +218,14 @@ export class CreateLinkCommand implements EditCommand {
     if (project.links.some((l) => l.id === this.link.id)) {
       throw new EditError(`duplicate link id ${String(this.link.id)}`, this.kind);
     }
+    // One link per ordered pair, whatever its type (MS Project; and
+    // diffPredecessors keys a task's predecessors by source). Ids compare by
+    // String(), as the predecessor commands do.
+    const source = String(this.link.source);
+    const target = String(this.link.target);
+    if (project.links.some((l) => String(l.source) === source && String(l.target) === target)) {
+      throw new EditError(`a link from ${source} to ${target} already exists`, this.kind);
+    }
     if (!project.tasks.some((t) => t.id === this.link.source)) {
       throw new EditError(`source task ${String(this.link.source)} not found`, this.kind);
     }

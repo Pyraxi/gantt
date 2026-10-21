@@ -16,6 +16,7 @@ import type {
   Task,
   WorkInterval,
 } from '../types.js';
+import { workingIntervals } from '../working-time.js';
 import type { DroppedField, MspdiSerializeOptions } from './types.js';
 
 interface MspdiPredecessorLinkOut {
@@ -350,7 +351,10 @@ function toMspdiCalendar(cal: Calendar): MspdiCalendarOut {
   };
 }
 
-function toRecurringWeekDay(mspdiDayType: number, intervals: WorkInterval[]): MspdiWeekDayOut {
+function toRecurringWeekDay(mspdiDayType: number, all: WorkInterval[]): MspdiWeekDayOut {
+  // Inverted / zero-length intervals hold no working time in the engine, so
+  // they aren't written; a day of only those is non-working.
+  const intervals = workingIntervals(all);
   const working = intervals.length > 0;
   const out: MspdiWeekDayOut = {
     DayType: mspdiDayType,
@@ -365,16 +369,20 @@ function toRecurringWeekDay(mspdiDayType: number, intervals: WorkInterval[]): Ms
 function toExceptionWeekDay(ex: CalendarException): MspdiWeekDayOut {
   const dayStart = startOfDay(ex.date);
   const dayEnd = endOfDay(ex.date);
+  // As for week days: only intervals that hold working time are written, and
+  // a working exception whose intervals are all inverted is non-working.
+  const intervals = workingIntervals(ex.intervals ?? []);
+  const working = ex.isWorking && (intervals.length > 0 || !ex.intervals?.length);
   const out: MspdiWeekDayOut = {
     DayType: 0,
-    DayWorking: ex.isWorking ? 1 : 0,
+    DayWorking: working ? 1 : 0,
     TimePeriod: {
       FromDate: formatMspdiDate(dayStart),
       ToDate: formatMspdiDate(dayEnd),
     },
   };
-  if (ex.isWorking && ex.intervals?.length) {
-    out.WorkingTimes = { WorkingTime: ex.intervals.map(toMspdiWorkingTime) };
+  if (working && intervals.length) {
+    out.WorkingTimes = { WorkingTime: intervals.map(toMspdiWorkingTime) };
   }
   return out;
 }
@@ -382,7 +390,9 @@ function toExceptionWeekDay(ex: CalendarException): MspdiWeekDayOut {
 function toMspdiWorkingTime(w: WorkInterval): MspdiWorkingTimeOut {
   return {
     FromTime: formatMspdiTime(w.startMinutes),
-    ToTime: formatMspdiTime(w.endMinutes),
+    // End of day is written as midnight, as MS Project does ("24 Hours" is
+    // 00:00:00 → 00:00:00); the parser reads it back as 1440.
+    ToTime: formatMspdiTime(w.endMinutes === 1440 ? 0 : w.endMinutes),
   };
 }
 

@@ -1,5 +1,32 @@
 # construction-gantt
 
+## 1.7.6
+
+### Patch Changes
+
+- 92f7009: A calendar work interval whose end is at or before its start (inverted or zero-length) now counts as no working time everywhere working time is read. Before, it added negative time, so durations across such a day came out too long, and a default calendar made only of them made `schedule()` hang. Such a default calendar now throws the same "no working time" error as an empty one. The grid's minutes-per-day ignores these intervals too. `serializeMspdi` no longer writes these intervals, and a week day or working exception made only of them is written as non-working.
+
+  MSPDI import now reads a `ToTime` of `00:00:00` as the end of the day (minute 1440), as MS Project and MPXJ do. MS Project's "24 Hours" calendar (`00:00:00` to `00:00:00`) was otherwise read as zero-length, so it had no working time. `serializeMspdi` writes an interval ending at 1440 as `00:00:00`, so it round-trips.
+
+- Updated dependencies [537c686]
+- Updated dependencies [cb2d34f]
+- Updated dependencies [537c686]
+- Updated dependencies [537c686]
+- Updated dependencies [92f7009]
+- Updated dependencies [f707d03]
+  - @pyraxi/cpm-engine@1.2.5
+
+## 1.7.5
+
+### Patch Changes
+
+- d27eb32: Fix: a plain `field` date column (e.g. `{ id: 'start', field: 'start', header: 'Start' }` with no `render`) showed the UTC date, so in NZ an 08:00 start read as the previous day. It now shows the local date.
+- d863043: Fix: with `visibleTaskIds`, a task whose parent summary was filtered out wasn't drawn at all.
+  - It now renders under its nearest visible ancestor, or at the top level.
+  - A drag or add that would file a task under a filtered-out summary is refused (a visible no-op), so work can't be moved out of sight.
+  - To keep the summaries visible instead, include their ids in the set.
+- 2149cc6: Fix: `exportXLSX` date cells showed the previous evening in NZ (an 08:00 start read `4/01/2026 7:00 PM`). `exceljs` stores a Date by its UTC epoch, so the export now writes the local wall clock. This also applies to a custom XLSX column whose `value` function returns a Date; string values are unchanged.
+
 ## 1.7.4
 
 ### Patch Changes

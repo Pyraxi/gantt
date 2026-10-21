@@ -1,6 +1,6 @@
 {
   "name": "@pyraxi/cpm-engine",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "description": "Pyraxi CPM Engine — headless construction scheduling engine: forward/backward critical-path pass, 8 MS Project constraint types, negative slack, working-time calendars, baselines, MSPDI interop. Pure TypeScript, framework-agnostic.",
   "type": "module",
   "license": "MIT",

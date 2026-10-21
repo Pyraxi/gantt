@@ -12,7 +12,8 @@
 //    can't deliver in time get negative slack on themselves.
 // 4. Slack: totalSlack = workingMinutesBetween(earlyStart, lateStart) in
 //    working time. freeSlack = min working gap to earliest successor's
-//    required start. isCritical = totalSlack <= 0.
+//    required start, or (no successor) to the project's early finish, capped
+//    at total slack. isCritical = totalSlack <= 0.
 //
 // Per ADR-003, negative slack is preserved, not clipped to zero. A task
 // with negative slack is already late against a downstream constraint;
@@ -23,10 +24,11 @@
 // backward pass to re-flow downstream dates. For now ALAP is parsed but
 // behaves like ASAP.
 
-import { topologicalSort } from './topological-sort';
+import { assertUniqueTaskIds, topologicalSort } from './topological-sort';
 import type { Calendar, Link, Project, Task, TaskComputed, TaskId } from './types';
 import {
   addWorkingMinutes,
+  createWorkingMinutesCounter,
   snapToNextWorkingMoment,
   snapToPreviousWorkingMoment,
   subtractWorkingMinutes,
@@ -44,11 +46,18 @@ interface BackwardDates {
 }
 
 export function schedule(project: Project): Project {
+  // Every id → task map below keeps one row per id: a duplicate would be
+  // silently mis-scheduled (or misreported as a cycle), so refuse it up front.
+  assertUniqueTaskIds(project.tasks, 'schedule()');
   const calendar = getDefaultCalendar(project);
   const sorted = topologicalSort(project.tasks, project.links);
   const taskById = new Map<TaskId, Task>(sorted.map((t) => [t.id, t]));
   const childrenByParent = groupChildrenByParent(project.tasks);
   const summariesByDepthDesc = summariesDeepestFirst(project.tasks);
+  // Index links once — per-task filtering of the whole link array made the
+  // passes O(tasks × links), superlinear at 5k tasks.
+  const incomingByTarget = groupLinksBy(project.links, 'target');
+  const outgoingBySource = groupLinksBy(project.links, 'source');
 
   // Unscheduled tasks (ADR-007) are excluded from the pass entirely: no
   // computed, no cascade. They pass through to the output untouched.
@@ -91,7 +100,7 @@ export function schedule(project: Project): Project {
     }
 
     let earliest = projectFloor;
-    for (const link of incomingLinks(task.id, project.links)) {
+    for (const link of incomingByTarget.get(task.id) ?? []) {
       if (!isScheduled(link.source)) continue; // ADR-007: inert link from unscheduled
       const source = taskById.get(link.source);
       const sourceFwd = forwardById.get(link.source);
@@ -111,6 +120,14 @@ export function schedule(project: Project): Project {
     if (aggregated) forwardById.set(summary.id, aggregated);
   }
 
+  // The project's early finish: free float of a task with no (constraining)
+  // successor runs to here (MS Project / P6).
+  let projectEarlyFinish: Date | undefined;
+  for (const f of forwardById.values()) {
+    if (!projectEarlyFinish || f.earlyFinish > projectEarlyFinish)
+      projectEarlyFinish = f.earlyFinish;
+  }
+
   // Backward pass — leaves first (reverse-sorted), summaries bottom-up after.
   const projectCeiling = projectFinishAnchor(project, forwardById, calendar);
   const backwardById = new Map<TaskId, BackwardDates>();
@@ -120,7 +137,7 @@ export function schedule(project: Project): Project {
     if (task.unscheduled) continue; // ADR-007: no pass for unscheduled tasks
 
     let latest = projectCeiling;
-    for (const link of outgoingLinks(task.id, project.links)) {
+    for (const link of outgoingBySource.get(task.id) ?? []) {
       if (!isScheduled(link.target)) continue; // ADR-007: inert link to unscheduled
       const target = taskById.get(link.target);
       const targetBwd = backwardById.get(link.target);
@@ -144,6 +161,20 @@ export function schedule(project: Project): Project {
   // For auto-mode tasks, write the scheduled dates back to task.start/end
   // (MS Project default behavior). Manual-mode tasks keep their user-set
   // dates regardless.
+  // Slack spans can be long (an open-ended leaf floats to the project
+  // finish): measure a long one with a memoised counter rather than a
+  // day-by-day walk per task. The counter's set-up covers its span plus a
+  // year each side, so short spans (the usual case, and every span of a
+  // small programme re-scheduled per edit) keep the walk. Both give the
+  // same answer.
+  const LONG_SPAN_MS = 60 * 86_400_000;
+  let counter: ((a: Date, b: Date) => number) | undefined;
+  const slackBetween = (a: Date, b: Date): number => {
+    if (Math.abs(b.getTime() - a.getTime()) < LONG_SPAN_MS)
+      return workingMinutesBetween(a, b, calendar);
+    counter ??= createWorkingMinutesCounter(calendar);
+    return counter(a, b);
+  };
   const newTasks = project.tasks.map((t): Task => {
     const f = forwardById.get(t.id);
     const b = backwardById.get(t.id);
@@ -152,8 +183,15 @@ export function schedule(project: Project): Project {
     // returning `t` verbatim leaks old dates/slack/criticality (ADR-007: an
     // unscheduled task contributes no computed). Strip it.
     if (!f || !b) return t.computed ? { ...t, computed: undefined } : t;
-    const totalSlack = workingMinutesBetween(f.earlyStart, b.lateStart, calendar);
-    const freeSlack = computeFreeSlack(t, f, forwardById, project.links, calendar);
+    const totalSlack = slackBetween(f.earlyStart, b.lateStart);
+    // No constraining successor: float to the project's early finish, and
+    // never more than total slack.
+    const freeSlack =
+      computeFreeSlack(t, f, forwardById, outgoingBySource.get(t.id) ?? [], calendar) ??
+      Math.min(
+        totalSlack,
+        projectEarlyFinish ? slackBetween(f.earlyFinish, projectEarlyFinish) : 0,
+      );
     const computed: TaskComputed = {
       earlyStart: f.earlyStart,
       earlyFinish: f.earlyFinish,
@@ -352,12 +390,14 @@ function getDefaultCalendar(project: Project): Calendar {
   return calendar;
 }
 
-function incomingLinks(taskId: TaskId, links: Link[]): Link[] {
-  return links.filter((l) => l.target === taskId);
-}
-
-function outgoingLinks(taskId: TaskId, links: Link[]): Link[] {
-  return links.filter((l) => l.source === taskId);
+function groupLinksBy(links: Link[], end: 'source' | 'target'): Map<TaskId, Link[]> {
+  const map = new Map<TaskId, Link[]>();
+  for (const l of links) {
+    const list = map.get(l[end]);
+    if (list) list.push(l);
+    else map.set(l[end], [l]);
+  }
+  return map;
 }
 
 function projectFinishAnchor(
@@ -476,11 +516,10 @@ function computeFreeSlack(
   task: Task,
   taskFwd: ForwardDates,
   forwardById: Map<TaskId, ForwardDates>,
-  links: Link[],
+  outgoing: Link[],
   calendar: Calendar,
-): number {
-  const outgoing = links.filter((l) => l.source === task.id);
-  if (outgoing.length === 0) return 0;
+): number | undefined {
+  if (outgoing.length === 0) return undefined;
 
   let minGap = Number.POSITIVE_INFINITY;
   for (const link of outgoing) {
@@ -513,5 +552,6 @@ function computeFreeSlack(
     const gap = workingMinutesBetween(taskFwd.earlyFinish, requiredEnd, calendar);
     if (gap < minGap) minGap = gap;
   }
-  return Number.isFinite(minGap) ? minGap : 0;
+  // Undefined: no successor constrains it (the caller measures to the project finish).
+  return Number.isFinite(minGap) ? minGap : undefined;
 }

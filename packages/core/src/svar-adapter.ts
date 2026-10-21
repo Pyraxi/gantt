@@ -568,7 +568,8 @@ export function projectHasSplitTasks(tasks: Task[]): boolean {
 export function workingMinutesPerDay(calendar: Calendar): number {
   for (const day of calendar.workWeek) {
     if (day && day.length > 0) {
-      const mins = day.reduce((sum, iv) => sum + (iv.endMinutes - iv.startMinutes), 0);
+      // An inverted / zero-length interval holds no time (as in the engine).
+      const mins = day.reduce((sum, iv) => sum + Math.max(0, iv.endMinutes - iv.startMinutes), 0);
       if (mins > 0) return mins;
     }
   }

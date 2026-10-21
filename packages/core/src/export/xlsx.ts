@@ -32,14 +32,33 @@ export function buildSheetRows(project: Project, columns: XlsxColumn[]): SheetRo
   return [header, ...dataRows];
 }
 
+/**
+ * A Date as Excel should show it: exceljs stores a Date by its UTC epoch, so
+ * write the local wall clock as UTC (an 08:00 NZ start was showing as the
+ * previous evening).
+ */
+function excelDate(d: Date): Date {
+  return new Date(
+    Date.UTC(
+      d.getFullYear(),
+      d.getMonth(),
+      d.getDate(),
+      d.getHours(),
+      d.getMinutes(),
+      d.getSeconds(),
+    ),
+  );
+}
+
 function readCell(task: Task, column: XlsxColumn): SheetCell {
   if (typeof column.value === 'function') {
     const raw = column.value(task);
+    if (raw instanceof Date) return excelDate(raw);
     return raw ?? '';
   }
   const raw = task[column.value];
   if (raw === undefined || raw === null) return '';
-  if (raw instanceof Date) return raw;
+  if (raw instanceof Date) return excelDate(raw);
   if (typeof raw === 'number' || typeof raw === 'string') return raw;
   return String(raw);
 }
