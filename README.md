@@ -310,6 +310,42 @@ is enabled and a predecessors column is not already present in the `columns`
 array. (The lower-level `formatPredecessors(links, opts?)` still emits raw ids
 with minute lag when called without `opts.tasks`/`opts.minutesPerDay`.)
 
+**Typing predecessors (`editable: true`, with `tasks`).** In `editMode` the
+cell is click-to-edit, as in MS Project, by row number in `tasks`: `3`,
+`3FS+2d`, `5SS-1d, 7FF`, `4FS+4 hrs`, `4FS+50%` and `2FS+3ed` (elapsed). Lags
+show in the largest exact unit (`+1.5 days`, `+4 hrs`, `+30 mins`), so an
+untouched predecessor reads back unchanged. Unreadable text, unknown rows, self-references and loops
+keep the editor open with the reason as its tooltip. Escape cancels. A commit
+fires `onCellEdit`; apply it as one undo step:
+
+```tsx
+import { parsePredecessors, predecessorsColumn } from '@pyraxi/gantt';
+import { EditError, pushCommand, setPredecessors } from '@pyraxi/cpm-engine';
+
+const opts = { tasks: project.tasks, minutesPerDay: 480 };
+<Gantt
+  project={project}
+  editMode
+  columns={[...defaultColumns, predecessorsColumn(project.links, { ...opts, editable: true })]}
+  onCellEdit={(id, col, text) => {
+    if (col !== 'predecessors') return;
+    const parsed = parsePredecessors(text, { ...opts, targetId: id });
+    if (!parsed.ok) return;
+    const cmd = setPredecessors(id, parsed.preds);
+    try {
+      setProject(cmd.apply(project));
+      setHistory(pushCommand(history, cmd)); // one undo step
+    } catch (e) {
+      if (e instanceof EditError) showToast(e.message); // the links changed meanwhile
+      else throw e;
+    }
+  }}
+/>;
+```
+
+Custom text editors get the same open-on-error behaviour from
+`GanttColumnEditor.validate(value, task)`.
+
 #### ID column (v1.7)
 
 ```tsx
@@ -321,6 +357,42 @@ import { idColumn } from '@pyraxi/gantt';
 `idColumn(tasks)` renders MS Project's `#` column — the 1-based row number. Numbers
 follow the flat `tasks[]` array order, so store the array in DFS display order for
 them to line up with the visual tree rows.
+
+#### WBS column
+
+```tsx
+import { idColumn, wbsColumn } from '@pyraxi/gantt';
+
+<Gantt
+  project={project}
+  columns={[idColumn(project.tasks), wbsColumn(project.tasks), ...defaultColumns]}
+/>;
+```
+
+`wbsColumn(tasks)` renders MS Project's WBS / outline number (`1`, `1.2`,
+`1.2.3`) from the parent / child structure, via the engine's `computeWbs`. A
+host-owned code wins where it's non-empty (an empty one falls back to the
+outline number, as in MS Project):
+`wbsColumn(tasks, { code: (t) => t.codes?.wbs ?? (t.extra?.wbsCode as string | undefined) })`.
+For a `groupProject` view, pass the **source** project's tasks, so members keep
+their real numbers; group rows are blank. Rebuild the column when the tasks
+change, as with `idColumn`.
+
+#### Importing a programme from Excel / CSV
+
+```ts
+import { importProgrammeTable, readSpreadsheet } from '@pyraxi/gantt';
+
+const table = await readSpreadsheet(file); // .xlsx; or parseClipboardTable(text) for pasted, parseClipboardTable(text, ',') for CSV
+const { project, skipped } = importProgrammeTable(table, { dateOrder: 'dmy' });
+// skipped: [{ row, column, value, reason }] — show these to the user
+<Gantt project={project} />;
+```
+
+- **Columns** are found by header, matching MS Project / P6 export names: ID, Name, Duration, Start, Finish, Predecessors, Outline Level or WBS, and % Complete. `options.columns` maps any others.
+- **Logic:** durations (including MS Project's `3 days?` and `2 edays`), dates and predecessor text (`3FS+2d`, or P6 `A1000SS`) use the grid's own parsers. Hierarchy comes from the outline level or WBS.
+- **Placement:** a dated task with no predecessors keeps its date (start-no-earlier-than).
+- **Errors:** unreadable cells are reported in `skipped`, never guessed.
 
 #### All chrome at once
 
@@ -393,6 +465,40 @@ Each bridge vetoes SVAR's own optimistic mutation, so nothing changes on screen 
 - **`onTaskReorder(id, direction)`** — fires for toolbar/menu "Move up"/"Move down" (`'up' | 'down'`).
 - **`onTaskIndent(id, direction)`** — fires for toolbar/menu "Indent"/"Outdent" (`'indent' | 'outdent'`).
 - **`onTaskSelect(id)`** (v1.4) — fires when a task bar or its grid row is selected (SVAR-native selection). Independent of `editMode`. Open a task panel on select instead of a dedicated edit-button column.
+
+**Highlights (schedule checks, search hits):** `highlights={[{ taskIds, color }]}` rings the bars and tints the grid rows of each set. Later sets win. Feed it `checkSchedule(project).checks[i].taskIds` while your app lists the checks.
+
+**Progress line (weekly update):** with a status date (`project.statusDate`, or `progressLine={{ statusDate }}`), `progressLine` draws the jagged line from the status date through each task's progress point. It bends left for tasks behind and right for tasks ahead, as in MS Project and P6. The colour is `--cg-progress-line-color`. The points come from the engine's `progressPoints(project, statusDate)`. `progressLine={{ basis: 'physical' }}` places them by each task's `physicalProgress` (P6's physical % complete) instead of duration %.
+
+**Compare two revisions (ghost bars):** `baselineFrom(revC, 1, { name: 'Rev C' })` turns an earlier revision into a baseline. Pass the revision's date as `capturedAt` for the ghost label. Add it to the current project's `baselines` and show it with `baselineIndices={[1]}`, in the default `baselineRender="row"`. Rev C then draws as ghost rows under each task, and the slip/ahead pills are the revision's delta. `compareSchedules(revC, revD)` gives the same deltas as data, plus added, removed and logic changes.
+
+**Your own strips under the chart:** `chartPanels={[{ id, label?, height?, render }]}` adds a strip per entry under the chart, on its timescale. `render(ctx)` gets the scheduled `project`, the timeline `width`, the panel `height` and `xOf(date)`, which lines up with the bars at every zoom. Draw an `<svg width={ctx.width}>`; it scrolls with the chart, and the label sits under the grid. For resource load, the engine's `resourceUsage(project)` gives each resource's load and capacity per day or week, and `overAllocations(project)` lists the over-booked stretches with their tasks, ready for `highlights`.
+
+**Badges and previous starts on bars:** `taskBadges={(task) => [{ kind, label, tone? }]}` puts small labelled badges just before a task's bar (e.g. `'✓ Ready'`, tone `success`). `label` is required, so the meaning never rests on colour alone. `previousStart={(task) => ({ date, pending? })}` draws a ghost marker at an earlier start, joined to the bar, amber with a `?` when `pending`. `onTaskBadgeClick(taskId, kind)` fires on a click. With `displayOptions`, **Badges** and **Previous starts** toggles hide them.
+
+**Task Path (why is this task late?):** `taskPath="driving" | "driven" | "both"` highlights the selected task's **driving predecessors** (orange) and the **successors it drives** (purple), with their driving links. It's MS Project's Task Path, computed from the engine's relationship free float. `taskPathFor={id}` follows a host panel instead of the selection. Restyle it with `--cg-path-driving-color` / `--cg-path-driven-color`. The engine side is `analyseDriving(project).drivingPath(id)` / `.drivenPath(id)`, and `getDrivenPath`.
+
+**Grid clipboard (Excel paste, copy, fill-down):** in `editMode`, with a grid cell focused (not inside an editor):
+- **Ctrl/Cmd+V** pastes a block copied from Excel, positionally from that cell: the next rows down, and the visible columns rightwards. Read-only cells (summary dates, group rows, computed columns), unparseable values and cells past the grid's edge are skipped, never forced.
+  - Dates accept `2026-10-19`, `19/10/2026` (day-first; set `dateOrder="mdy"` for US) and `19 Oct 2026`.
+  - Durations use the calendar's units, and progress accepts `50%`.
+- **Ctrl/Cmd+C** copies the cell (or the focused column of the selected rows).
+- **Ctrl/Cmd+D** fills down: the top selected row's value goes to the rest, or the value comes from the row above.
+
+While a grid cell is focused, Ctrl/Cmd+C/V/X/D belong to the grid clipboard, and ancestor `keydown` listeners don't see those keys. SVAR's own copy/paste/delete-task hotkeys are shielded the same way.
+
+Wire **`onTasksEdit(edits, { source, skipped })`** to receive a paste or fill as one batch, for one persist and one undo step. Without it, each task's patch goes to `onTaskEdit`. `gridClipboard={false}` turns all of this off.
+
+```tsx
+<Gantt
+  editMode
+  onTaskEdit={(id, patch) => ep.enqueue(updateTask(id, patch))}
+  onTasksEdit={(edits) => {
+    for (const { id, patch } of edits) ep.enqueue(updateTask(id, patch));
+    ep.commit('Paste');
+  }}
+/>
+```
 
 **Inline-editable grid columns (v1.4):** set `editable: true` on a `GanttColumn` to make its cell inline-editable (click to type) — **even when the column has a custom `render`**. It keeps the custom formatting for display and becomes an input on click, with edits flowing through `onTaskEdit` + the live CPM preview. Applies to `text`/`start`/`end`/`duration`/`progress` in `editMode`; `editable: false` forces read-only; unset keeps prior behavior (editable iff no `render`).
 

@@ -82,3 +82,31 @@ export function formatDuration(
   if (minutes % units.hour === 0) return `${minutes / units.hour}h`;
   return `${minutes / units.minute}m`;
 }
+
+/** Elapsed (wall-clock) units, for `Task.durationElapsed` (MS Project `ed`): a day is 24 h. */
+export const ELAPSED_DURATION_UNITS: DurationUnitMinutes = {
+  minute: 1,
+  hour: 60,
+  day: 1440,
+  week: 10080,
+  month: 43200, // 30 days
+};
+
+/** An elapsed duration in MS Project notation: `3ed`, `36eh`, `30em`. */
+export function formatElapsedDuration(minutes: number): string {
+  return formatDuration(minutes, ELAPSED_DURATION_UNITS).replace(/([a-z]+)$/, 'e$1');
+}
+
+/**
+ * Parse an elapsed duration: `3ed`, `3 edays`, `36eh` — or the same without
+ * the `e` (`3d`, a bare `3` = days), since the task is already elapsed.
+ * Null when unparseable.
+ */
+export function parseElapsedDuration(input: string): number | null {
+  const match = input
+    .trim()
+    .toLowerCase()
+    .match(/^(\d+(?:\.\d+)?)\s*e?\s*([a-z]*)$/);
+  if (!match) return null;
+  return parseDuration(`${match[1]}${match[2] ?? ''}`, ELAPSED_DURATION_UNITS);
+}

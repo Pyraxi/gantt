@@ -25,7 +25,7 @@ XLSX is the data-driven path with the tight contract documented below. PNG and P
 
 ## XLSX — default columns
 
-`exportXLSX({ scheduled, options })` produces one sheet (default name: `"Programme"`) with one row per `Project.tasks` entry. The default column set, in order:
+`exportXLSX({ scheduled, visibleTaskIds?, options })` produces one sheet (default name: `"Programme"`) with one row per `Project.tasks` entry: the whole programme by default (`options.scope: 'all'`), or, with `options.scope: 'visible'`, only the tasks in the screen's filter (`visibleTaskIds`). Whole-by-default is a coord decision (2026-10-16): a filtered spreadsheet opened later reads as the programme, so it must never be truncated silently. The default column set, in order:
 
 | Header | Read from | Notes |
 |---|---|---|

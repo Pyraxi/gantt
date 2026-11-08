@@ -159,8 +159,8 @@ export function workingMinutesBetween(a: Date, b: Date, calendar: Calendar): num
  * Working-minute distances for many date pairs in one calendar — the same
  * answer as {@link workingMinutesBetween}, but each day's working time is
  * computed once and kept in a running total, so a query is O(1) after the
- * first pass over its date range (slack to the project finish across a
- * 5,000-task open-ended programme).
+ * first pass over its date range (comparing two revisions of a 5,000-task
+ * programme moved by a year was ~9 s with the day-by-day walk).
  */
 export function createWorkingMinutesCounter(calendar: Calendar): (a: Date, b: Date) => number {
   const exceptions = new Map<string, CalendarException>();
@@ -272,6 +272,9 @@ function findNextWorkingInterval(date: Date, calendar: Calendar): DatedInterval 
         0,
         iv.endMinutes,
       );
+      // An interval starting in a skipped DST hour can construct with its
+      // end before its start (Chile springs forward at midnight): no time.
+      if (intervalEnd <= intervalStart) continue;
       if (intervalEnd > date) {
         return { start: intervalStart, end: intervalEnd };
       }
@@ -308,6 +311,7 @@ function findPreviousWorkingInterval(date: Date, calendar: Calendar): DatedInter
         0,
         iv.endMinutes,
       );
+      if (intervalEnd <= intervalStart) continue; // as above (DST gap)
       if (intervalStart < date) {
         return { start: intervalStart, end: intervalEnd };
       }
@@ -350,4 +354,20 @@ function isSameCalendarDay(a: Date, b: Date): boolean {
     a.getMonth() === b.getMonth() &&
     a.getDate() === b.getDate()
   );
+}
+
+/**
+ * Working minutes in the calendar's first working weekday — its standard
+ * working day (480 when it has none). Converts days to minutes.
+ */
+export function workingMinutesPerDay(calendar: Calendar | undefined): number {
+  for (const day of calendar?.workWeek ?? []) {
+    // An inverted / zero-length interval holds no time (as in working-time).
+    const mins = (day ?? []).reduce(
+      (sum, iv) => sum + Math.max(0, iv.endMinutes - iv.startMinutes),
+      0,
+    );
+    if (mins > 0) return mins;
+  }
+  return 480;
 }

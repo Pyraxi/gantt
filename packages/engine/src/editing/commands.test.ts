@@ -244,6 +244,26 @@ describe('UpdateLinkCommand', () => {
     expect(next.links[0].type).toBe('FS');
   });
 
+  test('a plain lag patch replaces a percent lag (lagPercent would override it); inverse restores it', () => {
+    const p: Project = {
+      ...projectOf([task('a'), task('b')]),
+      links: [{ ...link('l1', 'a', 'b'), lagPercent: 50 }],
+    };
+    const cmd = new UpdateLinkCommand('l1', { lag: 480 });
+    const next = cmd.apply(p);
+    expect(next.links[0].lag).toBe(480);
+    expect(next.links[0].lagPercent).toBeUndefined();
+    expect(cmd.inverse(next).apply(next).links[0].lagPercent).toBe(50);
+    // Undoing a lag patch on a plain link leaves no `lagPercent` key behind.
+    const plain: Project = { ...p, links: [link('l1', 'a', 'b')] };
+    const c2 = new UpdateLinkCommand('l1', { lag: 480 });
+    const n2 = c2.apply(plain);
+    expect(c2.inverse(n2).apply(n2).links).toStrictEqual(plain.links);
+    // Setting both keeps the percent.
+    const both = new UpdateLinkCommand('l1', { lag: 0, lagPercent: 25 }).apply(p);
+    expect(both.links[0].lagPercent).toBe(25);
+  });
+
   test('apply throws when link does not exist', () => {
     const p = projectOf([task('a')]);
     const cmd = new UpdateLinkCommand('missing', { lag: 60 });

@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import { analyseDriving } from './driving';
 import { CreateLinkCommand } from './editing/commands';
 import { EditError } from './editing/errors';
 import { linkTasks } from './editing/factories';
+import { setPredecessors } from './editing/predecessors';
 import { schedule } from './schedule';
 import { topologicalSort } from './topological-sort';
 import type { Calendar, Link, Project, Task, TaskComputed, WorkInterval } from './types';
@@ -81,8 +83,9 @@ describe('edge sweep: network', () => {
     const c = computedOf(
       project([t('a', 1), t('z', 0), t('b', 1)], [link('a', 'z'), link('z', 'b')]),
     );
-    // Mon 17:00 ≡ Tue 08:00: the milestone sits at the next working moment.
-    expect(c('z').earlyStart).toEqual(d(6));
+    // The milestone sits at its predecessor's finish, Mon 17:00 (MS Project);
+    // its successor starts at the next working moment.
+    expect(c('z').earlyStart).toEqual(new Date(2026, 0, 5, 17));
     expect(c('z').earlyFinish).toEqual(c('z').earlyStart);
     expect(c('b').earlyStart).toEqual(d(6));
     expect(Object.is(c('z').totalSlack, 0)).toBe(true); // not -0
@@ -155,28 +158,30 @@ describe('edge sweep: network', () => {
     expect(Object.is(c('z').freeSlack, 0)).toBe(true);
   });
 
-  it('slack in the assembly pass equals workingMinutesBetween', () => {
-    // Open-ended leaves float ~90 days to the project finish (long spans take
-    // the memoised counter); p and r lead into the long task, so p's 3-day
-    // float keeps the walk. Both must give the walk's numbers.
+  it('slack in the assembly pass equals workingMinutesBetween in each task calendar', () => {
+    // Open-ended leaves on two calendars (one with holidays) float ~90 days
+    // to the project finish (long spans take the memoised counter); p and r
+    // lead into the long task, so p's 3-day float keeps the walk. Both must
+    // give the walk's numbers.
     const hol = { ...withHolidays(14, 26), id: 'hol' };
     const tasks = [
       t('long', 90),
       t('p', 2),
-      t('r', 5),
-      ...Array.from({ length: 12 }, (_, i) => t(`x${i}`, (i % 4) + 1)),
+      t('r', 5, { calendarId: 'hol' }),
+      ...Array.from({ length: 12 }, (_, i) =>
+        t(`x${i}`, (i % 4) + 1, { calendarId: i % 2 ? 'hol' : 'six' }),
+      ),
     ];
     const links = [link('p', 'long'), link('r', 'long')];
-    const out = schedule(
-      project(tasks, links, { calendars: [std, hol], defaultCalendarId: 'hol' }),
-    );
+    const out = schedule(project(tasks, links, { calendars: [std, sixDay, hol] }));
+    const cal = (id?: string) => [std, sixDay, hol].find((k) => k.id === (id ?? 'std')) as Calendar;
     const finish = out.tasks.find((x) => x.id === 'long')?.computed?.earlyFinish as Date;
     const c = (id: string) => out.tasks.find((x) => x.id === id)?.computed as TaskComputed;
     expect(c('p').totalSlack).toBe(3 * DAY);
     expect(c('x0').totalSlack).toBeGreaterThan(80 * DAY);
     for (const x of out.tasks) {
       const k = x.computed as TaskComputed;
-      const kc = hol;
+      const kc = cal(x.calendarId);
       expect(k.totalSlack).toBe(workingMinutesBetween(k.earlyStart, k.lateStart, kc));
       if (x.id === 'p' || x.id === 'r') continue; // free float to a successor
       expect(k.freeSlack).toBe(
@@ -224,6 +229,9 @@ describe('edge sweep: network', () => {
     // edit layer refuses to create one.
     expect(() => schedule(project([t('a', 1)], [link('a', 'a')]))).toThrow(/cycle/);
     expect(() => linkTasks('a', 'a').apply(project([t('a', 1)]))).toThrow(EditError);
+    expect(() =>
+      setPredecessors('a', [{ source: 'a', type: 'FS', lag: 0 }]).apply(project([t('a', 1)])),
+    ).toThrow(EditError);
   });
 
   it('links to unknown task ids are ignored by schedule() and refused by the edit layer', () => {
@@ -259,7 +267,7 @@ describe('edge sweep: network', () => {
     expect(() => schedule(p)).toThrow('schedule(): duplicate task ids "a", "b"');
   });
 
-  it('shuffled tasks and links give identical dates and float', () => {
+  it('shuffled tasks and links give identical dates, float and driving (incl. tied drivers)', () => {
     const tasks = [
       t('a', 2),
       t('b', 2),
@@ -283,9 +291,22 @@ describe('edge sweep: network', () => {
           .sort((x, y) => String(x.id).localeCompare(String(y.id)))
           .map((x) => [x.id, x.computed]),
       );
-      return { dates };
+      const an = analyseDriving(s);
+      const driving = Object.fromEntries(
+        [...an.links].sort(([x], [y]) => String(x).localeCompare(String(y))),
+      );
+      const asSet = (ids: (string | number)[]) => ids.map(String).sort();
+      return {
+        dates,
+        driving,
+        drivingPath: asSet(an.drivingPath('g').taskIds),
+        drivingLinks: asSet(an.drivingPath('g').linkIds),
+        longest: asSet(an.longestPath().taskIds),
+      };
     };
     const reference = snapshot(project(tasks, links));
+    expect(reference.driving['a-c']?.driving).toBe(true);
+    expect(reference.driving['b-c']?.driving).toBe(true);
     // Seeded Fisher–Yates so a failure is reproducible.
     let seed = 42;
     const rand = () => {
@@ -358,6 +379,22 @@ describe('edge sweep: calendars', () => {
     }
   });
 
+  it('a six-day predecessor finishing Saturday into a five-day successor has non-negative float', () => {
+    const tight = computedOf(
+      project([t('a', 6, { calendarId: 'six' }), t('b', 5)], [link('a', 'b')]),
+    );
+    expect(tight('a').earlyFinish).toEqual(d(10, 17)); // Saturday
+    expect(tight('b').earlyStart).toEqual(d(12));
+    expect(tight('a').totalSlack).toBe(0);
+    expect(tight('a').freeSlack).toBeGreaterThanOrEqual(0);
+    // With a longer parallel task, both share the same 2 days of float.
+    const loose = computedOf(
+      project([t('a', 6, { calendarId: 'six' }), t('b', 5), t('c', 12)], [link('a', 'b')]),
+    );
+    expect(loose('a').totalSlack).toBe(2 * DAY);
+    expect(loose('b').totalSlack).toBe(2 * DAY);
+  });
+
   it('a project start on a weekend does not make a shorter parallel root critical', () => {
     const c = computedOf(
       project([t('a', 2), t('b', 1), t('c', 1)], [link('a', 'c'), link('b', 'c')], {
@@ -397,6 +434,19 @@ describe('edge sweep: calendars', () => {
     // (programme import adds the SNET). A bare `start` is recomputed.
     const c = computedOf(project([t('r', 1, { start: d(12), end: d(12, 17) })]));
     expect(c('r').earlyStart).toEqual(MON);
+  });
+
+  it('an all-non-working task calendar falls back to the default and says so', () => {
+    const empty: Calendar = {
+      id: 'none',
+      name: 'none',
+      workWeek: Array(7).fill([]),
+      exceptions: [],
+    };
+    const p = project([t('a', 2, { calendarId: 'none' })], [], { calendars: [std, empty] });
+    const c = computedOf(p)('a');
+    expect(c.calendarFallback).toBe('empty-calendar');
+    expect(c.earlyFinish).toEqual(d(6, 17));
   });
 
   it('a short workWeek treats the missing weekdays as non-working', () => {
@@ -484,6 +534,14 @@ describe('edge sweep: calendars', () => {
 // ---------------------------------------------------------------------------
 
 describe('edge sweep: repeated edge writes', () => {
+  it('a repeated setPredecessors write replaces the link instead of duplicating it', () => {
+    let p = project([t('a', 1), t('b', 1)]);
+    p = setPredecessors('b', [{ source: 'a', type: 'FS', lag: 0 }]).apply(p);
+    p = setPredecessors('b', [{ source: 'a', type: 'SS', lag: DAY }]).apply(p);
+    expect(p.links).toHaveLength(1);
+    expect(p.links[0]).toMatchObject({ source: 'a', target: 'b', type: 'SS', lag: DAY });
+  });
+
   it('BY-DESIGN: linkTasks twice for the same pair throws instead of silently coalescing', () => {
     const p = linkTasks('a', 'b').apply(project([t('a', 1), t('b', 1)]));
     expect(() => linkTasks('a', 'b').apply(p)).toThrow(/duplicate link id/);

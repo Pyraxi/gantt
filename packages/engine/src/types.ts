@@ -55,8 +55,18 @@ export interface Task {
    */
   open?: boolean;
 
-  /** Working-time duration in minutes. For milestones this is 0. */
+  /**
+   * Duration in minutes: working minutes, or wall-clock minutes when
+   * `durationElapsed`. For milestones this is 0.
+   */
   duration: number;
+
+  /**
+   * The duration runs in elapsed (wall-clock) time — through nights, weekends
+   * and holidays (MS Project `3ed`; curing, drying). Scheduled on a 24/7
+   * calendar that overrides the task's and its resources' calendars.
+   */
+  durationElapsed?: boolean;
 
   /**
    * User-set start / end. For manual-scheduled tasks these are authoritative.
@@ -70,17 +80,69 @@ export interface Task {
   /** Percent complete, 0-100. */
   progress: number;
 
+  /**
+   * Physical % complete, 0-100: how much of the work is in place, judged on
+   * site, independently of `progress` (duration %). MS Project / P6 keep both;
+   * it drives earned value and, optionally, the progress line
+   * (`progressPoints(…, { basis: 'physical' })`). Never schedules.
+   */
+  physicalProgress?: number;
+
+  /**
+   * When work actually started. With `Project.statusDate` set, a task with an
+   * actual start (or 0 < progress < 100) is in progress: its start is fixed
+   * and its remaining work follows the work done (see `Project.statusDate`).
+   */
+  actualStart?: Date;
+  /** When work actually finished. With `Project.statusDate` set, the task is complete and fixed. */
+  actualFinish?: Date;
+  /**
+   * Activity-code values, keyed by `CodeType.id` (trade, area, level,
+   * subcontractor). Metadata for grouping / filtering; never scheduled on.
+   */
+  codes?: Record<string, string>;
+  /**
+   * Set only on the virtual rows `groupProject` creates: which grouping and
+   * value the row stands for. A UI can use it to treat the row as read-only.
+   */
+  group?: { by: string; value: string; color?: string };
+  /**
+   * Working minutes left. With `Project.statusDate` set and this absent, it's
+   * `duration × (1 − progress / 100)` (P6 duration % complete).
+   */
+  remainingDuration?: number;
+
   constraint?: Constraint;
+  /**
+   * P6 secondary constraint: one of SNET / SNLT / FNET / FNLT, applied after
+   * `constraint` (e.g. primary SNET + secondary FNLT — a start floor and a
+   * finish deadline). Ignored when the primary is mandatory (MSO / MFO), as
+   * P6 disallows it. Not in MSPDI (MS Project has one constraint per task).
+   */
+  secondaryConstraint?: Constraint;
+  /**
+   * P6 Expected Finish: with a status date, an in-progress task's remaining
+   * work is the working time from the status date to this date (overriding
+   * `remainingDuration` / `progress`). Ignored without a status date.
+   */
+  expectedFinish?: Date;
 
   /** Resource assignments. Order is not meaningful. */
   resourceIds?: ResourceId[];
 
   /**
    * Calendar override. If unset, the task uses the project default calendar.
-   * If a resource on the task has a calendar, the engine reconciles them
-   * (resource calendar wins for activities depending on that resource).
+   * `schedule()` works the task in this calendar intersected with the
+   * calendar of every assigned resource that has an explicit `calendarId`
+   * (see `getEffectiveCalendar`). An unknown id falls back to the default.
    */
   calendarId?: CalendarId;
+
+  /**
+   * When true, assigned resources' calendars are ignored and the task works
+   * in its own (or the default) calendar only. MSPDI `<IgnoreResourceCalendar>`.
+   */
+  ignoreResourceCalendar?: boolean;
 
   /** Populated by the scheduling engine. Read-only for user code. */
   computed?: TaskComputed;
@@ -150,6 +212,25 @@ export interface TaskComputed {
    * Mirrors `totalSlack`'s "negative = bad" convention.
    */
   deadlineSlackMinutes?: number;
+  /** Present only when `Project.statusDate` is set: where the task stands at the status date. */
+  status?: 'not-started' | 'in-progress' | 'complete';
+  /** In-progress tasks (status date set): when the remaining work is forecast to start. */
+  remainingStart?: Date;
+  /**
+   * In-progress tasks (status date set): started before a finish-to-start /
+   * finish-to-finish predecessor finished, or a start-to-start /
+   * start-to-finish predecessor started.
+   */
+  outOfSequence?: boolean;
+  /**
+   * Present only when the engine could not use the task's calendars as given
+   * and fell back. `'unknown-calendar'`: the task's `calendarId` matches no
+   * calendar, so the default was used. `'empty-calendar'`: the task's calendar
+   * has no working time (or its base chain is broken), so the default was used.
+   * `'empty-intersection'`: the task and resource calendars share no working
+   * time, so resource calendars were ignored.
+   */
+  calendarFallback?: 'unknown-calendar' | 'empty-calendar' | 'empty-intersection';
 }
 
 // ---------------------------------------------------------------------------
@@ -171,11 +252,24 @@ export interface Link {
   target: TaskId;
   type: DependencyType;
   /**
-   * Lag in working-minutes. Positive = delay, negative = lead.
+   * Lag in minutes — working minutes, or wall-clock minutes when `lagElapsed`.
+   * Positive = delay, negative = lead. Ignored when `lagPercent` is set.
    * Construction example: 3-day cure time on a FS link = lag of 3 working days
    * converted to minutes via the calendar.
    */
   lag: number;
+  /**
+   * Lag as a percentage of the predecessor's duration (MS Project `FS+50%`;
+   * negative = lead). When set it overrides `lag`: the effective lag is
+   * `round(source.duration × lagPercent / 100)` minutes (see `lagMinutes`) —
+   * working, or elapsed when `lagElapsed` is also set.
+   */
+  lagPercent?: number;
+  /**
+   * The lag runs in elapsed (wall-clock) time — through nights, weekends and
+   * holidays — instead of working time (MS Project `2ed`; concrete curing).
+   */
+  lagElapsed?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -198,8 +292,9 @@ export type DayOfWeek = 0 | 1 | 2 | 3 | 4 | 5 | 6; // Sun=0 … Sat=6
  *   (e.g. 7-12 + 13-15 for concreting with a lunch break).
  * - `exceptions` override specific dates: holidays, weather days, site
  *   shutdown periods, or "this Saturday is a working day."
- * - `baseCalendarId` lets resource/task calendars inherit from a base
- *   and override only the differences.
+ * - `baseCalendarId` lets resource/task calendars inherit from a base:
+ *   the base's exceptions apply on dates the derived calendar doesn't
+ *   override, and `inheritedDays` take the base's weekly intervals.
  */
 export interface Calendar {
   id: CalendarId;
@@ -207,6 +302,13 @@ export interface Calendar {
   workWeek: WorkInterval[][];
   exceptions: CalendarException[];
   baseCalendarId?: CalendarId;
+  /**
+   * Weekdays whose intervals come from the base calendar instead of
+   * `workWeek` (the `workWeek` entry for those days is ignored). Only
+   * meaningful with `baseCalendarId`. MSPDI derived calendars omit the
+   * `<WeekDay>`s they inherit; the parser records them here.
+   */
+  inheritedDays?: DayOfWeek[];
 }
 
 export interface CalendarException {
@@ -438,4 +540,52 @@ export interface Project {
   baselines: Baseline[];
   /** Resource-to-task allocations. Empty array if no resources are allocated. */
   assignments: Assignment[];
+  /**
+   * Status date. When set, `schedule()` schedules from the actuals, as MS
+   * Project does: complete tasks are fixed at their actual dates, and an
+   * in-progress task keeps its actual start, with its remaining work right
+   * after the work done (or after an unfinished predecessor, with retained
+   * logic). The status date itself moves nothing, so unstarted or remaining
+   * work can sit behind it; `checkSchedule()` reports that as invalid dates.
+   * Set `rescheduleAfterStatusDate` to forecast from it instead (P6).
+   * Manual-mode tasks keep their user dates; only their `computed.status` is
+   * reported. Unset = progress is cosmetic (byte-identical to before).
+   */
+  statusDate?: Date;
+  /**
+   * Forecast work left to do from the status date, like P6's data date or MS
+   * Project's "Reschedule uncompleted work to start after": in-progress
+   * remaining work starts no earlier than the status date, and nothing
+   * unstarted is forecast before it (except a hard MSO / MFO pin, which wins).
+   * Default `false`: MS Project's own scheduling (see `statusDate`).
+   */
+  rescheduleAfterStatusDate?: boolean;
+  /**
+   * How in-progress remaining work treats its predecessors (status date set).
+   * `'retained-logic'` (default): it still waits for unfinished predecessors.
+   * `'progress-override'`: logic is ignored for work already under way.
+   */
+  progressMode?: 'retained-logic' | 'progress-override';
+  /** Activity-code vocabularies (P6 activity codes / MS Project outline codes, flat). */
+  codeTypes?: CodeType[];
+}
+
+// ---------------------------------------------------------------------------
+// Activity codes (parity row 8)
+// ---------------------------------------------------------------------------
+
+/** One activity-code vocabulary, e.g. Trade: Plumbing, Framing, … */
+export interface CodeType {
+  id: string;
+  name: string;
+  /** Allowed values, in display / grouping order. */
+  values: CodeValue[];
+}
+
+export interface CodeValue {
+  value: string;
+  /** Display name (group-row title); defaults to `value`. */
+  description?: string;
+  /** Group / bar colour hint (CSS colour). */
+  color?: string;
 }

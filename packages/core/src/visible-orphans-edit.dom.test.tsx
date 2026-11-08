@@ -1,6 +1,6 @@
 // Re-rooted rows (visibleTaskIds, parent filtered out) must not let a gesture
-// file a task under a summary the user can't see (e.g. a host's trade filters
-// that leave summaries out). Separate file: vi.mock is hoisted per file.
+// file a task under a summary the user can't see. CM: bolt-in commits + trade
+// filters that leave summaries out. Separate file: vi.mock is hoisted per file.
 import type { Calendar, Project, Task } from '@pyraxi/cpm-engine';
 import { act, cleanup, render } from '@testing-library/react';
 import { createElement } from 'react';

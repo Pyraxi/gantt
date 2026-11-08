@@ -46,12 +46,13 @@ import type {
   GanttToolbarItem,
   GanttZoomConfig,
   GanttZoomLevel,
+  LinkId,
   Project,
   Task,
   TaskId,
   TaskType,
 } from '@pyraxi/cpm-engine';
-import { getTaskBaselineVariance } from '@pyraxi/cpm-engine';
+import { getTaskBaselineVariance, workingMinutesPerDay } from '@pyraxi/cpm-engine';
 import type { TaskEditPatch } from './editing/useEditState.js';
 
 // ---------------------------------------------------------------------------
@@ -80,11 +81,26 @@ export interface SvarTaskWithComputed extends ITask {
   baseline_index?: BaselineIndex;
   /** True for phantom rows representing a live recalc preview position. */
   is_edit_preview?: boolean;
-  /** Same-row baseline underlay geometry (baselineRender='inline'); % of the live bar box. */
-  baseline_inline?: { leftPct: number; widthPct: number };
+  /**
+   * A virtual group row from `groupProject` (`Task.group`): shown, but its id
+   * isn't in the consumer's project, so it's read-only.
+   */
+  is_group_row?: boolean;
+  /**
+   * Same-row baseline (baselineRender='inline'): its dates, as SVAR would draw
+   * them (end per {@link svarBarEnd}). The bar template places it with SVAR's
+   * own scale ({@link svarGhostBox}) — the scale only exists at render.
+   */
+  /** `Task.durationElapsed`: `duration` here is 24 h days, not working days. */
+  /** Working minutes in a day of the task's own calendar, when it isn't the default's (pills). */
+  day_minutes?: number;
+  duration_elapsed?: boolean;
+  baseline_inline?: { start: Date; end: Date };
   /** Consumer carry-through bag (`Task.extra`), threaded so the hover tooltip can
    *  read host-app fields the engine doesn't model (e.g. assignee, trade). */
   extra?: Record<string, unknown>;
+  /** The task's activity codes (`Task.codes`), carried for render columns. */
+  codes?: Task['codes'];
 }
 
 // ---------------------------------------------------------------------------
@@ -294,7 +310,8 @@ type ZoomLevelConfig = {
 // (`%F %Y`, `%j`, …) so the labels render exactly like the base component.
 const ZOOM_LEVEL_CONFIGS: Record<string, ZoomLevelConfig> = {
   // F4 fix: hour and day have distinct bands to prevent scroll-wheel oscillation.
-  // hour sits below day so zooming out from hour transitions to day, not back to hour.
+  // Level order is coarse → fine (see resolveZoomLevels), so zooming out from
+  // hour steps to day, and zooming in from day steps to hour.
   hour: {
     minCellWidth: 5,
     maxCellWidth: 19,
@@ -344,12 +361,35 @@ const ZOOM_FALLBACK = ZOOM_LEVEL_CONFIGS.week as ZoomLevelConfig;
  * Convert a construction-gantt GanttZoomConfig (agnostic named levels) to
  * SVAR's IZoomConfig (cell-width-range mechanism). ADR-002: SVAR types stay here.
  */
-export function toSvarZoom(config: GanttZoomConfig): IZoomConfig {
+/**
+ * SVAR steps zoom level `index + dir` and zoom-in (wheel-up, wider cells) is
+ * `dir = +1`, so its levels must run coarse → fine. Config order is free-form
+ * (the documented example is `['day', 'week', 'month']`), so sort it.
+ */
+const ZOOM_COARSE_TO_FINE: readonly string[] = ['quarter', 'month', 'week', 'day', 'hour'];
+const zoomRank = (name: string): number => {
+  const i = ZOOM_COARSE_TO_FINE.indexOf(name);
+  return i >= 0 ? i : ZOOM_COARSE_TO_FINE.indexOf('week'); // unknown → week (ZOOM_FALLBACK)
+};
+
+/**
+ * Configured zoom levels (or the default set) in SVAR's coarse → fine order —
+ * single source for toSvarZoom + zoomLevelAt, so level index ↔ name agree.
+ */
+export function resolveZoomLevels(config: GanttZoomConfig): GanttZoomLevel[] {
   const levels =
-    config.levels && config.levels.length > 0 ? config.levels : ['day', 'week', 'month'];
-  const defaultLevel = config.default ?? levels[0] ?? 'day';
+    config.levels && config.levels.length > 0 ? config.levels : (['day', 'week', 'month'] as const);
+  return [...levels].sort((a, b) => zoomRank(a) - zoomRank(b));
+}
+
+export function toSvarZoom(config: GanttZoomConfig): IZoomConfig {
+  const levels = resolveZoomLevels(config);
+  // No (or an unknown) default → the first level as configured, not the
+  // coarsest after sorting: `levels: ['day', …]` has always opened at day.
+  const configured = config.levels?.[0] ?? 'day';
+  const index = levels.indexOf((config.default ?? configured) as GanttZoomLevel);
   return {
-    level: Math.max(0, levels.indexOf(defaultLevel as GanttZoomLevel)),
+    level: index >= 0 ? index : Math.max(0, levels.indexOf(configured as GanttZoomLevel)),
     levels: levels.map((name) => {
       const cfg = ZOOM_LEVEL_CONFIGS[name as string] ?? ZOOM_FALLBACK;
       return {
@@ -559,22 +599,9 @@ export function projectHasSplitTasks(tasks: Task[]): boolean {
  * Added in this pass: mapping of `task.unscheduled` and `task.segments` per
  * ADR-007 and the spike finding (svar-chrome-spike.md §7–8).
  */
-/**
- * Working-minutes in a standard working day for `calendar` — the sum of the
- * first non-empty day's intervals. Used to display task duration in DAYS (what
- * SVAR's grid expects and what a PM reads) rather than our internal
- * working-minutes. Falls back to 480 (8h) if the calendar has no working day.
- */
-export function workingMinutesPerDay(calendar: Calendar): number {
-  for (const day of calendar.workWeek) {
-    if (day && day.length > 0) {
-      // An inverted / zero-length interval holds no time (as in the engine).
-      const mins = day.reduce((sum, iv) => sum + Math.max(0, iv.endMinutes - iv.startMinutes), 0);
-      if (mins > 0) return mins;
-    }
-  }
-  return 480;
-}
+// Working minutes in a calendar's standard day: the engine's (one definition
+// for grid editing, imports and the engine's own day ↔ minute conversions).
+export { workingMinutesPerDay };
 
 /**
  * Escape a task id for safe interpolation into a double-quoted CSS
@@ -584,7 +611,16 @@ export function workingMinutesPerDay(calendar: Calendar): number {
  * `</style>` and break out of the stylesheet. Defence-in-depth: ids are usually
  * system-generated, but the public API accepts arbitrary `TaskId` strings.
  */
-function cssAttrId(id: TaskId): string {
+/**
+ * The `data-id` / `data-link-id` value SVAR renders for `id` (its `setID`:
+ * strings get a ':' prefix, numbers stay bare), CSS-escaped — only that form
+ * can match.
+ */
+export function svarDataId(id: TaskId | LinkId): string {
+  return typeof id === 'number' ? cssAttrId(id) : `:${cssAttrId(id)}`;
+}
+
+export function cssAttrId(id: TaskId | LinkId): string {
   return String(id).replace(/["\\<>\n\r]/g, (c) => `\\${c.codePointAt(0)?.toString(16)} `);
 }
 
@@ -682,9 +718,12 @@ export function toSvarTask(
   baseline: Baseline | undefined,
   calendar: Calendar | undefined,
   hasChildren = true,
+  /** The task's own effective calendar (variance and pills are measured in it). */
+  ownCalendar?: Calendar,
 ): SvarTaskWithComputed {
+  const varianceCal = ownCalendar ?? calendar;
   const variance =
-    baseline && calendar ? getTaskBaselineVariance(t, baseline, calendar) : undefined;
+    baseline && varianceCal ? getTaskBaselineVariance(t, baseline, varianceCal) : undefined;
   const startVariance = variance?.startVariance ?? 0;
 
   const base: SvarTaskWithComputed = {
@@ -695,7 +734,7 @@ export function toSvarTask(
     // Display duration in working days (SVAR's grid unit), not our internal
     // working-minutes. Only convert when a calendar is supplied (the real
     // render path); the test-only undefined-calendar path keeps raw minutes.
-    duration: calendar ? Math.round(t.duration / workingMinutesPerDay(calendar)) : t.duration,
+    duration: svarDays(t.duration, calendar, t.durationElapsed),
     progress: t.progress,
     type: t.type,
     parent: t.parent,
@@ -705,10 +744,15 @@ export function toSvarTask(
     start_variance: startVariance,
     is_slipped: startVariance >= 30,
     is_ahead: startVariance <= -30,
+    ...(t.durationElapsed ? { duration_elapsed: true } : {}),
+    ...dayMinutes(calendar, ownCalendar),
     deadline: t.deadline,
     deadline_missed: t.computed?.deadlineMissed ?? false,
     deadline_slack: t.computed?.deadlineSlackMinutes ?? 0,
     ...(t.extra !== undefined ? { extra: t.extra } : {}),
+    // Activity codes, for custom render columns (e.g. wbsColumn's `code`).
+    ...(t.codes !== undefined ? { codes: t.codes } : {}),
+    ...(t.group ? { is_group_row: true } : {}),
   };
 
   // `open` only meaningful on summary tasks. Setting it on leaves trips
@@ -759,7 +803,10 @@ export function buildSvarTasks(
   ghostBarsEnabled: boolean,
   editGhostProject?: Project,
   baselineRender: 'inline' | 'row' = 'row',
+  /** Each task's effective calendar (ADR-011); default: `calendar` for all. */
+  calendarOf?: (t: Task) => Calendar,
 ): SvarTaskWithComputed[] {
+  const ownOf = (t: Task) => (t.type === 'summary' ? undefined : calendarOf?.(t));
   const ghostById = new Map<TaskId, Task>(editGhostProject?.tasks.map((t) => [t.id, t]) ?? []);
 
   // Ids that appear as some rendered task's `parent` — i.e. summaries that
@@ -778,7 +825,9 @@ export function buildSvarTasks(
 
   if (!ghostBarsEnabled || resolvedBaselines.length === 0) {
     const primary = resolvedBaselines[0];
-    const out = renderableTasks.map((t) => toSvarTask(t, primary, calendar, summaryHasChildren(t)));
+    const out = renderableTasks.map((t) =>
+      toSvarTask(t, primary, calendar, summaryHasChildren(t), ownOf(t)),
+    );
     if (ghostById.size > 0) {
       for (const t of renderableTasks) {
         if (t.type === 'summary') continue;
@@ -797,7 +846,7 @@ export function buildSvarTasks(
   const out: SvarTaskWithComputed[] = [];
   for (const t of renderableTasks) {
     const liveBarBaseline = resolvedBaselines.length === 1 ? resolvedBaselines[0] : undefined;
-    const live = toSvarTask(t, liveBarBaseline, calendar, summaryHasChildren(t));
+    const live = toSvarTask(t, liveBarBaseline, calendar, summaryHasChildren(t), ownOf(t));
     out.push(live);
     if (t.type === 'summary') continue;
     if (t.unscheduled) continue; // F8: unscheduled tasks have no primary bar → no phantoms
@@ -805,18 +854,19 @@ export function buildSvarTasks(
       const b = resolvedBaselines[i];
       if (!b) continue;
       if (i === 0 && baselineRender === 'inline') {
-        // Same-row underlay: attach geometry to the live row instead of a phantom row.
+        // Same-row underlay: attach the baseline's dates to the live row instead
+        // of a phantom row. Not on milestones: SVAR gives them no end (the
+        // diamond has no span to underlay).
         const snap = b.tasks.get(t.id);
-        if (snap) {
-          const geom = inlineBaselineGeom(
-            { start: t.start, end: t.end },
-            { start: snap.start, end: snap.end },
-          );
-          if (geom) live.baseline_inline = geom;
+        if (snap && t.type !== 'milestone') {
+          live.baseline_inline = {
+            start: snap.start,
+            end: svarBarEnd(snap.start, snap.end, snap.duration, calendar, t.durationElapsed),
+          };
         }
         continue;
       }
-      const phantom = makeBaselinePhantom(t, b, calendar);
+      const phantom = makeBaselinePhantom(t, b, calendar, ownOf(t));
       if (phantom) out.push(phantom);
     }
     // Edit preview phantom goes last (renders below baseline phantoms).
@@ -836,31 +886,93 @@ export function buildSvarTasks(
 // ---------------------------------------------------------------------------
 
 /**
- * Position a baseline bar as a percentage of the live task's bar box, using
- * calendar-time (SVAR positions bars on the wall-clock axis, so % is
- * zoom-agnostic — no pixel measurement, no SVAR internals). Returns null when
- * the live span is zero (milestone — no underlay).
+ * The end SVAR draws a bar to, given what the phantom-row path hands it: SVAR
+ * recomputes `end = start + duration` whole calendar days (`durationUnit:
+ * 'day'`, no calendar), keeping `end` only when the day count rounds to 0. The
+ * inline ghost uses the same rule, so an unchanged task's ghost matches its bar.
  */
-export function inlineBaselineGeom(
-  live: { start: Date; end: Date },
-  base: { start: Date; end: Date },
-): { leftPct: number; widthPct: number } | null {
-  const span = live.end.getTime() - live.start.getTime();
-  if (span <= 0) return null;
-  return {
-    leftPct: ((base.start.getTime() - live.start.getTime()) / span) * 100,
-    widthPct: ((base.end.getTime() - base.start.getTime()) / span) * 100,
+export function svarBarEnd(
+  start: Date,
+  end: Date,
+  durationMinutes: number,
+  calendar: Calendar | undefined,
+  elapsed = false,
+): Date {
+  const days = calendar ? svarDays(durationMinutes, calendar, elapsed) : 0;
+  if (days <= 0) return end;
+  return new Date(
+    start.getFullYear(),
+    start.getMonth(),
+    start.getDate() + days,
+    start.getHours(),
+    start.getMinutes(),
+    start.getSeconds(),
+    start.getMilliseconds(),
+  );
+}
+
+/**
+ * A duration as SVAR's whole days (its `durationUnit`): working days of the
+ * calendar, or 24 h days for an elapsed duration. No calendar (test path):
+ * raw minutes.
+ */
+export function svarDays(
+  minutes: number,
+  calendar: Calendar | undefined,
+  elapsed?: boolean,
+): number {
+  if (!calendar) return minutes;
+  return Math.round(minutes / (elapsed ? 1440 : workingMinutesPerDay(calendar)));
+}
+
+/** `day_minutes` for a row whose own calendar's day differs from the default's. */
+function dayMinutes(
+  calendar: Calendar | undefined,
+  own: Calendar | undefined,
+): { day_minutes?: number } {
+  if (!calendar || !own || own.id === calendar.id) return {};
+  const mine = workingMinutesPerDay(own);
+  return mine === workingMinutesPerDay(calendar) ? {} : { day_minutes: mine };
+}
+
+/** The slice of SVAR's store state that places a bar (`_t()` in gantt-store). */
+export interface SvarScaleState {
+  cellWidth: number;
+  _scales: {
+    start: Date;
+    lengthUnit: string;
+    diff(a: Date, b: Date, unit: string, ceil?: boolean): number;
   };
+}
+
+/**
+ * Where SVAR would draw a bar spanning `base`, relative to a bar at `barX`
+ * (both px): SVAR's own placement — `round(diff(date, scaleStart, lengthUnit) ×
+ * cellWidth)` — so an inline ghost lands exactly where the baseline's phantom
+ * row would, at every zoom (a % of the live bar's wall-clock span was ~2.7×
+ * off: SVAR draws whole cells).
+ */
+export function svarGhostBox(
+  state: SvarScaleState,
+  base: { start: Date; end: Date },
+  barX: number,
+): { left: number; width: number } {
+  const { cellWidth, _scales: s } = state;
+  const x = Math.round(s.diff(base.start, s.start, s.lengthUnit) * cellWidth);
+  const width = Math.round(s.diff(base.end, base.start, s.lengthUnit, true) * cellWidth);
+  return { left: x - barX, width };
 }
 
 export function makeBaselinePhantom(
   t: Task,
   baseline: Baseline,
   calendar: Calendar | undefined,
+  ownCalendar?: Calendar,
 ): SvarTaskWithComputed | null {
   const snap = baseline.tasks.get(t.id);
   if (!snap) return null;
-  const variance = calendar ? getTaskBaselineVariance(t, baseline, calendar) : undefined;
+  const varianceCal = ownCalendar ?? calendar;
+  const variance = varianceCal ? getTaskBaselineVariance(t, baseline, varianceCal) : undefined;
   const startVariance = variance?.startVariance ?? 0;
   return {
     id: `${t.id}__baseline_${baseline.index}`,
@@ -871,12 +983,14 @@ export function makeBaselinePhantom(
     // rows. Passing raw minutes here made SVAR read e.g. 16200 as ~16200 day-units and
     // auto-scale an end ~40 years out (Jan 2066), which its expand-only `_end` bound then
     // latched until reload (CM axis-latch bug, 2026-07-04).
-    duration: calendar ? Math.round(snap.duration / workingMinutesPerDay(calendar)) : snap.duration,
+    duration: svarDays(snap.duration, calendar, t.durationElapsed),
     progress: 0,
     type: 'task',
     parent: t.parent,
     is_baseline_ghost: true,
     baseline_index: baseline.index,
+    ...dayMinutes(calendar, ownCalendar),
+    ...(t.durationElapsed ? { duration_elapsed: true } : {}),
     start_variance: startVariance,
     is_slipped: startVariance >= 30,
     is_ahead: startVariance <= -30,
@@ -898,9 +1012,7 @@ export function makeEditPreviewPhantom(
     // ~16200 day-units and auto-scale an end ~40 years out (Jan 2066), which its
     // expand-only `_end` bound then latched until reload — the CM "vetoed-add"
     // axis blow-out (editing a freshly-added task drives this preview).
-    duration: calendar
-      ? Math.round(ghostTask.duration / workingMinutesPerDay(calendar))
-      : ghostTask.duration,
+    duration: svarDays(ghostTask.duration, calendar, ghostTask.durationElapsed),
     progress: 0,
     type: 'task',
     parent: liveTask.parent,

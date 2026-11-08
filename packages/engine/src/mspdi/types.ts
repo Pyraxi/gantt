@@ -9,6 +9,8 @@
 // subsequent commits.
 
 import type { Project } from '../types.js';
+import type { ExtendedAttributeMapping, IdRemapEntry } from './extended-attributes.js';
+import type { OutlineCodeMapping } from './outline-codes.js';
 
 /**
  * Result of parsing an MSPDI XML document.
@@ -61,4 +63,34 @@ export interface MspdiSerializeOptions {
    * reason 'lossy-on-roundtrip'.
    */
   droppedFields?: DroppedField[];
+  /**
+   * Write host-owned `Task.extra` values into MS Project local Text custom
+   * fields (Text1..Text30). Each mapping emits a project-level definition +
+   * a per-task `<ExtendedAttribute>` value; parse reads them back onto
+   * `Task.extra` (keyed by alias). Opt-in.
+   */
+  extendedAttributes?: ExtendedAttributeMapping[];
+  /**
+   * Write `Project.codeTypes` as MS Project task outline codes (Outline
+   * Code1..10): a lookup table per code type, its paired definition (Alias =
+   * the code type's name), and each task's `codes[codeTypeId]` value. Parse
+   * reads them back automatically, keyed by name. Opt-in; unmapped code types
+   * are reported in `droppedFields`.
+   */
+  outlineCodes?: OutlineCodeMapping[];
+  /**
+   * Emit every UID (task, resource, calendar, assignment) as a sequential
+   * integer from 1, per namespace, with all cross-references rewritten
+   * consistently. MS Project requires integer UIDs; pair with an
+   * `extendedAttributes` mapping to carry your original id through MS Project
+   * as a stable merge key. Opt-in; default emits ids as-is.
+   *
+   * Independently of this flag, a reference to an id that is not in the
+   * project (a link source, an assignment endpoint, a calendarId) is never
+   * emitted — the referencing element is dropped and reported in
+   * `droppedFields` (a passed-through id could collide with a real UID).
+   */
+  remapIdsToIntegers?: boolean;
+  /** When `remapIdsToIntegers` is on, receives one entry per (namespace, original id) → UID. */
+  idRemap?: IdRemapEntry[];
 }

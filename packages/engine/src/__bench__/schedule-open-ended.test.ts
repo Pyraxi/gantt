@@ -7,7 +7,7 @@ import type { Project, Task } from '../types';
 // span up to 250 working days. With a day-by-day walk per task this shape took
 // ~4.1–4.6 s (total slack only) and ~8–10 s once free float to the project
 // finish landed; with the memoised per-calendar counter for long spans it is
-// ~0.2 s on a 2 GHz Xeon. The budget is a generous tripwire for a return to per-task
+// ~0.2 s on a Xeon E5-2650. The budget is a generous tripwire for a return to per-task
 // day walks, not a micro-benchmark.
 const BUDGET_MS = 4000;
 const DAY = 540;

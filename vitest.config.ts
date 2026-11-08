@@ -14,6 +14,7 @@ export default defineConfig({
             'packages/engine/src/**/*.test.{ts,tsx}',
             'packages/core/src/**/*.test.{ts,tsx}',
             'packages/mpp-import/src/**/*.test.{ts,tsx}',
+            'packages/pro/src/**/*.test.{ts,tsx}',
           ],
           environment: 'happy-dom',
           setupFiles: ['./vitest.setup.ts'],

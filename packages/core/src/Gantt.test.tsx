@@ -20,6 +20,7 @@ import {
   resolveBaselines,
   resolveEffectiveBaselineIndices,
 } from './Gantt';
+import { svarBarEnd } from './svar-adapter';
 
 const STD = { startMinutes: 8 * 60, endMinutes: 17 * 60 };
 const standardCalendar: Calendar = {
@@ -207,7 +208,7 @@ describe('buildSvarTasks — multi-baseline emission', () => {
 });
 
 describe('buildSvarTasks — inline baseline mode', () => {
-  test('inline: live row carries baseline_inline, no __baseline_0 phantom', () => {
+  test('inline: live row carries the baseline dates (SVAR bar end), no __baseline_0 phantom', () => {
     let proj = projectOf([task('a'), task('b')]);
     proj = captureBaseline(proj, 0);
     const rows = buildSvarTasks(
@@ -220,7 +221,13 @@ describe('buildSvarTasks — inline baseline mode', () => {
     );
     expect(rows.length).toBe(2);
     expect(rows.some((r) => r.is_baseline_ghost)).toBe(false);
-    expect(rows.every((r) => r.baseline_inline !== undefined)).toBe(true);
+    for (const r of rows) {
+      const snap = proj.baselines[0]?.tasks.get(r.id as string);
+      expect(r.baseline_inline?.start).toEqual(snap?.start);
+      expect(r.baseline_inline?.end).toEqual(
+        snap && svarBarEnd(snap.start, snap.end, snap.duration, standardCalendar),
+      );
+    }
   });
   test('row mode (default) still emits phantom rows, no baseline_inline', () => {
     let proj = projectOf([task('a')]);
@@ -237,21 +244,20 @@ describe('buildSvarTasks — inline baseline mode', () => {
 });
 
 describe('ConstructionBar — inline baseline underlay', () => {
-  test('renders a positioned underlay div when baseline_inline is set', () => {
+  // Placement against SVAR's live scale is covered by inline-ghost.test.tsx
+  // (real store). Outside SVAR there's no scale, so no ghost is drawn.
+  test('no underlay outside SVAR (no live scale to place it with)', () => {
     const data = {
       id: 'a',
       text: 'A',
       type: 'task',
-      start: new Date(2026, 0, 5),
-      end: new Date(2026, 0, 15),
+      start: new Date(2026, 0, 5, 8),
+      end: new Date(2026, 0, 15, 8),
       progress: 0,
-      baseline_inline: { leftPct: -20, widthPct: 100 },
+      baseline_inline: { start: new Date(2026, 0, 3, 8), end: new Date(2026, 0, 13, 8) },
     } as never;
     const { container } = render(<ConstructionBar data={data} />);
-    const underlay = container.querySelector('.construction-gantt-baseline-inline') as HTMLElement;
-    expect(underlay).not.toBeNull();
-    expect(underlay.style.left).toBe('-20%');
-    expect(underlay.style.width).toBe('100%');
+    expect(container.querySelector('.construction-gantt-baseline-inline')).toBeNull();
   });
   test('no underlay div when baseline_inline is absent', () => {
     const data = {
@@ -777,5 +783,91 @@ describe('ConstructionBar — label overflow beside the bar (BT parity)', () => 
       const { container } = render(<ConstructionBar data={barData} />);
       expect(container.querySelector('.construction-gantt-bar-label-out')).toBeNull();
     });
+  });
+});
+
+describe('elapsed durations in the grid and bar', () => {
+  test('an elapsed task is 24 h days to SVAR (bar) and shows as 3ed', () => {
+    const p = projectOf([{ ...task('cure'), duration: 4320, durationElapsed: true }]);
+    const rows = buildSvarTasks(p.tasks, [], standardCalendar, true);
+    expect(rows[0]?.duration).toBe(3);
+    expect(rows[0]?.duration_elapsed).toBe(true);
+    const plain = buildSvarTasks(
+      projectOf([{ ...task('pour'), duration: 4320 }]).tasks,
+      [],
+      standardCalendar,
+      true,
+    );
+    expect(plain[0]?.duration).toBe(8); // 4320 working minutes ÷ 540
+    expect(plain[0]?.duration_elapsed).toBeUndefined();
+  });
+});
+
+describe('baseline pills in the task’s own calendar', () => {
+  const h24: Calendar = {
+    id: '24',
+    name: '24h',
+    workWeek: Array(7).fill([{ startMinutes: 0, endMinutes: 1440 }]),
+    exceptions: [],
+  };
+  const slipped = (extra: Partial<Task>) => {
+    const t = {
+      ...task('x'),
+      start: new Date(2026, 0, 8, 17),
+      end: new Date(2026, 0, 9, 17),
+      ...extra,
+    };
+    const base = captureBaseline(projectOf([t]), 0);
+    // 40 h later: Thu 17:00 → Sat 09:00.
+    return {
+      ...t,
+      start: new Date(2026, 0, 10, 9),
+      end: new Date(2026, 0, 11, 9),
+      _b: base.baselines,
+    };
+  };
+
+  test('a 24h task slipped 40 h: variance 2400 in its calendar, pill +2d (not +4d)', () => {
+    const t = slipped({ calendarId: '24' });
+    const rows = buildSvarTasks(
+      [t],
+      resolveBaselines(t._b, [0]),
+      standardCalendar,
+      true,
+      undefined,
+      'row',
+      () => h24,
+    );
+    const live = rows.find((r) => r.id === 'x');
+    expect(live?.start_variance).toBe(2400);
+    expect(live?.day_minutes).toBe(1440);
+    const { container } = render(<ConstructionBar data={live as never} />);
+    expect(container.textContent).toContain('+2d');
+  });
+
+  test('default-calendar rows are unchanged (no day_minutes); an elapsed row reads ed', () => {
+    const plain = slipped({});
+    const rows = buildSvarTasks(
+      [plain],
+      resolveBaselines(plain._b, [0]),
+      standardCalendar,
+      true,
+      undefined,
+      'row',
+      () => standardCalendar,
+    );
+    expect(rows[0]?.day_minutes).toBeUndefined();
+    const el = slipped({ durationElapsed: true, duration: 1440 });
+    const elRows = buildSvarTasks(
+      [el],
+      resolveBaselines(el._b, [0]),
+      standardCalendar,
+      true,
+      undefined,
+      'row',
+      () => h24,
+    );
+    const { container } = render(<ConstructionBar data={elRows[0] as never} />);
+    expect(container.textContent).toContain('+2ed');
   });
 });

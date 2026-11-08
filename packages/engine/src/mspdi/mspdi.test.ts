@@ -24,8 +24,10 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import type { Calendar, DependencyType, Link, Project, Task } from '../types.js';
+import type { IdRemapEntry } from './extended-attributes.js';
 import { parseMspdi } from './parse.js';
 import { serializeMspdi } from './serialize.js';
+import type { DroppedField } from './types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -886,7 +888,7 @@ describe('baselines round-trip', () => {
 // ---------------------------------------------------------------------------
 
 describe('serializeMspdi / parseMspdi — ADR-007 split + unscheduled tasks', () => {
-  test('unscheduled task: serialize emits IsNull=1, parse recovers unscheduled:true', () => {
+  test('unscheduled task: written as a manual task with text dates and its duration (MS Project keeps both), parse recovers unscheduled:true', () => {
     const original = projectOf(
       [
         task('1', 'Normal task', new Date(2026, 0, 5, 8), new Date(2026, 0, 5, 17), 540),
@@ -906,18 +908,209 @@ describe('serializeMspdi / parseMspdi — ADR-007 split + unscheduled tasks', ()
 
     const xml = serializeMspdi(original);
 
-    // Emitted MSPDI should contain IsNull=1 for the unscheduled task.
-    expect(xml).toContain('<IsNull>1</IsNull>');
+    // Not IsNull: MS Project reads that as a null row and drops the task
+    // (desktop run 10). A manual task with "TBD" for its dates survives, and
+    // keeps its duration with ManualDuration (run 11).
+    expect(xml).not.toContain('<IsNull>');
+    const second = xml.split('<Task>')[2] ?? '';
+    expect(second).toContain('<Manual>1</Manual>');
+    expect(second).toContain('<Estimated>1</Estimated>');
+    expect(second).toContain('<StartText>TBD</StartText>');
+    expect(second).toContain('<FinishText>TBD</FinishText>');
+    expect(second).toContain('<Duration>PT9H0M0S</Duration>');
+    expect(second).toContain('<ManualDuration>PT9H0M0S</ManualDuration>');
+    expect(second).not.toMatch(/<(Start|Finish|ManualStart|ManualFinish|RemainingDuration)>/);
 
-    // Parse should recover unscheduled:true on the task.
+    // Parse should recover unscheduled:true on the task. Its auto mode is
+    // written as manual, and reported.
     const { project: parsed, droppedFields } = parseMspdi(xml);
     expect(droppedFields).toEqual([]);
+    const written: DroppedField[] = [];
+    serializeMspdi(original, { droppedFields: written });
+    // Its auto mode doesn't survive; its duration does.
+    expect(written.map((f) => f.path)).toEqual(['Project.Tasks.Task[1].scheduleMode']);
+    // A file from before: a named IsNull task is still unscheduled.
+    const old = xml
+      .replace('<Manual>1</Manual>', '<IsNull>1</IsNull>')
+      .replace(
+        '<Estimated>1</Estimated>',
+        '<Start>2026-01-05T08:00:00</Start><Finish>2026-01-05T17:00:00</Finish>',
+      );
+    expect(parseMspdi(old).project.tasks.find((t) => t.id === '2')?.unscheduled).toBe(true);
 
     const normalTask = parsed.tasks.find((t) => t.id === '1');
     expect(normalTask?.unscheduled).toBeFalsy();
 
     const unscheduledTask = parsed.tasks.find((t) => t.id === '2');
     expect(unscheduledTask?.unscheduled).toBe(true);
+  });
+
+  test('unscheduled task: no dates anywhere — assignments, actuals, no placeholder split', () => {
+    const unscheduled = {
+      ...task('2', 'PC item', new Date(2026, 0, 5, 8), new Date(2026, 0, 9, 17), 2700),
+      unscheduled: true as const,
+      scheduleMode: 'manual' as const,
+      progress: 40,
+      actualStart: new Date(2026, 0, 5, 8),
+    };
+    const p = {
+      ...projectOf(
+        [
+          task('1', 'Normal task', new Date(2026, 0, 5, 8), new Date(2026, 0, 5, 17), 540),
+          unscheduled,
+        ],
+        [],
+      ),
+      statusDate: new Date(2026, 0, 8, 8),
+      rescheduleAfterStatusDate: true,
+    };
+    const written: DroppedField[] = [];
+    const xml = serializeMspdi(p, { droppedFields: written });
+    const t2 = xml.split('<Task>')[2]?.split('</Task>')[0] ?? '';
+    expect(t2).not.toMatch(/<(Start|Finish|Actual\w*|Stop|Resume)>/);
+    expect(t2).toContain('<Duration>PT45H0M0S</Duration>');
+    expect(t2).toContain('<PercentComplete>0</PercentComplete>');
+    // No placeholder assignment (it carries timephased dates).
+    expect(xml).not.toContain('<Assignment>');
+    expect(written.map((f) => f.path)).toEqual(['Project.Tasks.Task[1].progress']);
+    // With a resource: the assignment keeps its units and work, without dates.
+    const withCrew = serializeMspdi({
+      ...p,
+      resources: [{ id: 'r', name: 'Crew' }],
+      assignments: [{ id: 'a', taskId: '2', resourceId: 'r' }],
+    });
+    const a = withCrew.split('<Assignment>')[1]?.split('</Assignment>')[0] ?? '';
+    expect(a).toContain('<Work>PT45H0M0S</Work>');
+    expect(a).not.toMatch(/<(Start|Finish|ActualStart|ActualWork|Stop|Resume|TimephasedData)>/);
+  });
+
+  test('unscheduled task: its planned duration round-trips, a 0-day one too; a 0-day summary writes none', () => {
+    const u = (duration: number) => ({
+      ...task('1', 'PC item', new Date(2026, 0, 5, 8), new Date(2026, 0, 6, 17), duration),
+      unscheduled: true as const,
+    });
+    const parsed = parseMspdi(serializeMspdi(projectOf([u(1080)], []))).project.tasks[0];
+    expect(parsed).toMatchObject({ unscheduled: true, duration: 1080 });
+    // Started, with a forecast: still its planned 2 days, not actual + remaining.
+    const started = serializeMspdi(
+      projectOf([{ ...u(1080), progress: 50, remainingDuration: 900 }], []),
+    ).split('<Task>')[1];
+    expect(started).toContain('<Duration>PT18H0M0S</Duration>');
+    expect(started).toContain('<ManualDuration>PT18H0M0S</ManualDuration>');
+    // A 0-day one writes its 0: MS Project keeps 0 days only so (run 12).
+    const zero = serializeMspdi(projectOf([u(0)], [])).split('<Task>')[1] ?? '';
+    expect(zero).toContain('<StartText>TBD</StartText>');
+    expect(zero).toContain('<Duration>PT0H0M0S</Duration>');
+    expect(zero).toContain('<ManualDuration>PT0H0M0S</ManualDuration>');
+    // A non-finite duration writes none (not PTNaNH…).
+    const bad = serializeMspdi(projectOf([u(Number.NaN)], [])).split('<Task>')[1] ?? '';
+    expect(bad).not.toMatch(/<(Duration|ManualDuration)>/);
+    // A 0-day unscheduled summary: no duration, as run 12 checked it.
+    const summary = serializeMspdi(
+      projectOf(
+        [
+          { ...u(0), type: 'summary' as const },
+          {
+            ...task('2', 'Child', new Date(2026, 0, 5, 8), new Date(2026, 0, 5, 17), 540),
+            parent: '1',
+          },
+        ],
+        [],
+      ),
+    ).split('<Task>')[1];
+    expect(summary).toContain('<Summary>1</Summary>');
+    expect(summary).not.toMatch(/<(Duration|ManualDuration)>/);
+  });
+
+  test('manual tasks write FreeformDurationFormat (MS Project reads a manual elapsed duration only with it)', () => {
+    const day = (id: string, extra: Partial<Task>): Task => ({
+      ...task(id, `T${id}`, new Date(2026, 0, 5, 8), new Date(2026, 0, 7, 8), 2880),
+      ...extra,
+    });
+    const xml = serializeMspdi(
+      projectOf(
+        [
+          day('1', { scheduleMode: 'manual', durationElapsed: true }),
+          day('2', { durationElapsed: true }),
+          day('3', { scheduleMode: 'manual', duration: 1080, end: new Date(2026, 0, 6, 17) }),
+          day('4', { durationElapsed: true, unscheduled: true }),
+        ],
+        [],
+      ),
+    );
+    const [, manualElapsed, autoElapsed, manualDays, unscheduledElapsed] = xml.split('<Task>');
+    // Run 12: without it a manual 2ed task opened as 2 working days, and an
+    // unscheduled one as 48 working hours; with it, as 2 edays.
+    expect(manualElapsed).toMatch(
+      /<DurationFormat>8<\/DurationFormat>\s*<FreeformDurationFormat>8</,
+    );
+    expect(unscheduledElapsed).toContain('<FreeformDurationFormat>8</FreeformDurationFormat>');
+    expect(manualDays).toContain('<FreeformDurationFormat>7</FreeformDurationFormat>');
+    // Auto tasks don't need it (MS Project reads 2ed there already).
+    expect(autoElapsed).not.toContain('FreeformDurationFormat');
+    // It reads back without a report, and the elapsed duration with it.
+    const { project, droppedFields } = parseMspdi(xml);
+    expect(droppedFields.filter((f) => f.path.endsWith('FreeformDurationFormat'))).toEqual([]);
+    expect(project.tasks[0]).toMatchObject({ durationElapsed: true, duration: 2880 });
+    expect(project.tasks[3]).toMatchObject({
+      durationElapsed: true,
+      duration: 2880,
+      unscheduled: true,
+    });
+  });
+
+  test("MS Project's save of an unscheduled task (text dates plus placeholder dates) reads back as unscheduled", () => {
+    // As MS Project re-saves our unscheduled task (desktop run 11, r7).
+    const xml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Project xmlns="http://schemas.microsoft.com/project">
+  <Name>Resaved</Name>
+  <StartDate>2026-01-05T08:00:00</StartDate>
+  <Tasks>
+    <Task>
+      <UID>1</UID><ID>1</ID><Name>Frame</Name><Active>1</Active><Manual>0</Manual>
+      <OutlineLevel>1</OutlineLevel><StartText/><FinishText/><DurationText/>
+      <Start>2026-01-05T08:00:00</Start><Finish>2026-01-05T17:00:00</Finish><Duration>PT9H0M0S</Duration>
+      <Milestone>0</Milestone><Summary>0</Summary>
+    </Task>
+    <Task>
+      <UID>2</UID><ID>2</ID><Name>Provisional sum</Name><Active>1</Active><Manual>1</Manual>
+      <OutlineLevel>1</OutlineLevel><StartText>TBD</StartText><FinishText>TBD</FinishText>
+      <Start>2026-01-05T08:00:00</Start><Finish>2026-01-06T17:00:00</Finish><Duration>PT18H0M0S</Duration>
+      <ManualStart>2026-01-05T08:00:00</ManualStart><ManualFinish>2026-01-06T17:00:00</ManualFinish>
+      <ManualDuration>PT18H0M0S</ManualDuration><Estimated>1</Estimated><Milestone>0</Milestone><Summary>0</Summary>
+    </Task>
+  </Tasks>
+</Project>`;
+    const { project, droppedFields } = parseMspdi(xml);
+    expect(project.tasks[0]?.unscheduled).toBeFalsy();
+    expect(project.tasks[1]).toMatchObject({ unscheduled: true, duration: 1080 });
+    // Empty text dates (MS Project writes them on every task) aren't reported.
+    expect(droppedFields.filter((f) => /Text$/.test(f.path))).toEqual([]);
+    // Text on only one date of a dated manual task: still scheduled, and the text is reported.
+    const oneText = parseMspdi(xml.replace('<FinishText>TBD</FinishText>', '<FinishText/>'));
+    expect(oneText.project.tasks[1]?.unscheduled).toBeFalsy();
+    expect(oneText.droppedFields.map((f) => f.path)).toContain('Project.Tasks.Task[1].StartText');
+    // Text dates on an auto task don't make it unscheduled.
+    const auto = parseMspdi(xml.replace('<Manual>1</Manual>', '<Manual>0</Manual>'));
+    expect(auto.project.tasks[1]?.unscheduled).toBeFalsy();
+  });
+
+  test('a manual task with ManualStart / ManualFinish but no Start / Finish is not read as unscheduled', () => {
+    const xml = serializeMspdi(
+      projectOf(
+        [
+          {
+            ...task('1', 'M', new Date(2026, 0, 5, 8), new Date(2026, 0, 5, 17), 540),
+            scheduleMode: 'manual',
+          },
+        ],
+        [],
+      ),
+    )
+      .replace(/<Start>[^<]*<\/Start>/, '')
+      .replace(/<Finish>[^<]*<\/Finish>/, '');
+    expect(xml).toContain('<ManualStart>');
+    expect(parseMspdi(xml).project.tasks[0]?.unscheduled).toBeFalsy();
   });
 
   test('unscheduled flag is preserved on full serialize→parse round-trip', () => {
@@ -1055,7 +1248,11 @@ describe('parseMspdi/serializeMspdi — F-3: manual scheduleMode + calendarId ro
       ...task('1', 'On concreting cal', new Date(2026, 0, 5, 8), new Date(2026, 0, 5, 17), 540),
       calendarId: 'concreting',
     };
-    const xml = serializeMspdi(projectOf([withCal], []));
+    // The referenced calendar must exist: a calendarId naming a missing
+    // calendar is a dangling ref and is dropped + reported (F-8 policy).
+    const p = projectOf([withCal], []);
+    p.calendars = [...p.calendars, { ...standardCalendar, id: 'concreting', name: 'Concreting' }];
+    const xml = serializeMspdi(p);
     expect(xml).toContain('<CalendarUID>concreting</CalendarUID>');
     expect(parseMspdi(xml).project.tasks[0]!.calendarId).toBe('concreting');
   });
@@ -1080,5 +1277,397 @@ describe('deadline — MSPDI <Deadline> round-trip', () => {
     expect(xml.includes('<Deadline>')).toBe(false);
     const { project } = parseMspdi(xml);
     expect(project.tasks[0]!.deadline).toBeUndefined();
+  });
+});
+
+describe('Part C — Project element ordering (MSPDI xsd:sequence)', () => {
+  test('emits Tasks before Resources, Calendars before Tasks (schema order)', () => {
+    const p = projectOf(
+      [task('t1', 'A', new Date(2026, 0, 5, 8), new Date(2026, 0, 5, 17), 540)],
+      [],
+    );
+    p.resources = [{ id: 'r1', name: 'Crew' }];
+    p.calendars = [standardCalendar];
+    const xml = serializeMspdi(p);
+    expect(xml.indexOf('<Calendars>')).toBeLessThan(xml.indexOf('<Tasks>'));
+    expect(xml.indexOf('<Tasks>')).toBeLessThan(xml.indexOf('<Resources>'));
+  });
+});
+
+describe('TEXT_FIELD_IDS', () => {
+  test('Text1 = 188743731 (verified against MPXJ)', async () => {
+    const { TEXT_FIELD_IDS } = await import('./extended-attributes.js');
+    expect(TEXT_FIELD_IDS.Text1).toBe(188743731);
+  });
+});
+
+describe('ExtendedAttributes — serialize', () => {
+  const withExtra = (extra: Record<string, unknown>) =>
+    projectOf(
+      [{ ...task('t1', 'Pour', new Date(2026, 0, 5, 8), new Date(2026, 0, 5, 17), 540), extra }],
+      [],
+    );
+
+  test('emits project-level definition (before Calendars) + per-task value', () => {
+    const p = withExtra({ cmTaskId: 'abc-123' });
+    p.calendars = [standardCalendar];
+    const xml = serializeMspdi(p, {
+      extendedAttributes: [{ field: 'Text1', extraKey: 'cmTaskId' }],
+    });
+    expect(xml).toMatch(
+      /<ExtendedAttributes>[\s\S]*<FieldID>188743731<\/FieldID>[\s\S]*<FieldName>Text1<\/FieldName>[\s\S]*<Alias>cmTaskId<\/Alias>[\s\S]*<\/ExtendedAttributes>/,
+    );
+    expect(xml).toMatch(
+      /<ExtendedAttribute>\s*<FieldID>188743731<\/FieldID>\s*<Value>abc-123<\/Value>\s*<\/ExtendedAttribute>/,
+    );
+    expect(xml.indexOf('<ExtendedAttributes>')).toBeLessThan(xml.indexOf('<Calendars>'));
+  });
+
+  test('mapped extra not dropped; unmapped extra still dropped', () => {
+    const p = withExtra({ cmTaskId: 'x', other: 'y' });
+    const droppedFields: import('./types.js').DroppedField[] = [];
+    serializeMspdi(p, {
+      extendedAttributes: [{ field: 'Text1', extraKey: 'cmTaskId' }],
+      droppedFields,
+    });
+    expect(droppedFields.some((d) => /extra\.other/.test(d.path))).toBe(true);
+    expect(droppedFields.some((d) => /extra\.cmTaskId/.test(d.path))).toBe(false);
+  });
+
+  test('unknown field throws; over-long alias throws; empty value skipped', () => {
+    const p = withExtra({ cmTaskId: 'x' });
+    expect(() =>
+      serializeMspdi(p, {
+        extendedAttributes: [{ field: 'Text99' as `Text${number}`, extraKey: 'cmTaskId' }],
+      }),
+    ).toThrow();
+    expect(() =>
+      serializeMspdi(p, {
+        extendedAttributes: [{ field: 'Text1', extraKey: 'cmTaskId', alias: 'x'.repeat(51) }],
+      }),
+    ).toThrow();
+    const empty = withExtra({ cmTaskId: '' });
+    const xml = serializeMspdi(empty, {
+      extendedAttributes: [{ field: 'Text1', extraKey: 'cmTaskId' }],
+    });
+    // The project-level definition is still emitted; only the per-task value is
+    // skipped for an empty string (no <Value> node anywhere).
+    expect(xml).not.toContain('<Value>');
+  });
+});
+
+describe('ExtendedAttributes — parse + round-trip', () => {
+  test('round-trip preserves the extra key (symmetric)', () => {
+    const p = projectOf(
+      [
+        {
+          ...task('t1', 'A', new Date(2026, 0, 5, 8), new Date(2026, 0, 5, 17), 540),
+          extra: { cmTaskId: 'abc-123' },
+        },
+      ],
+      [],
+    );
+    const xml = serializeMspdi(p, {
+      extendedAttributes: [{ field: 'Text1', extraKey: 'cmTaskId' }],
+    });
+    expect(parseMspdi(xml).project.tasks[0]!.extra?.cmTaskId).toBe('abc-123');
+  });
+
+  test('real-file shape: aliased Text1 def + task value → extra.cmTaskId, no config', () => {
+    const xml = `<?xml version="1.0"?><Project xmlns="http://schemas.microsoft.com/project">
+      <Name>X</Name>
+      <ExtendedAttributes><ExtendedAttribute><FieldID>188743731</FieldID><FieldName>Text1</FieldName><Alias>cmTaskId</Alias></ExtendedAttribute></ExtendedAttributes>
+      <Tasks><Task><UID>1</UID><ID>1</ID><Name>A</Name><Start>2026-01-05T08:00:00</Start><Finish>2026-01-05T17:00:00</Finish><Duration>PT8H0M0S</Duration>
+        <ExtendedAttribute><FieldID>188743731</FieldID><Value>host-42</Value></ExtendedAttribute></Task></Tasks></Project>`;
+    expect(parseMspdi(xml).project.tasks[0]!.extra?.cmTaskId).toBe('host-42');
+  });
+
+  test('ValueGUID-only (no Value) → droppedFields, not extra["undefined"]', () => {
+    const xml = `<?xml version="1.0"?><Project xmlns="http://schemas.microsoft.com/project"><Name>X</Name>
+      <ExtendedAttributes><ExtendedAttribute><FieldID>188743731</FieldID><FieldName>Text1</FieldName><Alias>k</Alias></ExtendedAttribute></ExtendedAttributes>
+      <Tasks><Task><UID>1</UID><ID>1</ID><Name>A</Name><Start>2026-01-05T08:00:00</Start><Finish>2026-01-05T17:00:00</Finish><Duration>PT8H0M0S</Duration>
+        <ExtendedAttribute><FieldID>188743731</FieldID><ValueGUID>0000AAAA</ValueGUID></ExtendedAttribute></Task></Tasks></Project>`;
+    const { project, droppedFields } = parseMspdi(xml);
+    expect(project.tasks[0]!.extra?.k).toBeUndefined();
+    expect(droppedFields.some((d) => /ExtendedAttribute/.test(d.path))).toBe(true);
+  });
+});
+
+describe('F-8 — integer UID remap (opt-in) + dangling-ref policy', () => {
+  const day = (d: number, h: number) => new Date(2026, 0, d, h);
+  const strProject = (): Project => ({
+    ...projectOf(
+      [
+        { ...task('alpha', 'A', day(5, 8), day(5, 17), 540), extra: { cmTaskId: 'alpha' } },
+        { ...task('beta', 'B', day(6, 8), day(6, 17), 540), calendarId: 'std' },
+      ],
+      [{ id: 'l1', source: 'alpha', target: 'beta', type: 'FS', lag: 0 }],
+    ),
+    resources: [{ id: 'plumber', name: 'Plumber', calendarId: 'std' }],
+    assignments: [{ id: 'as1', taskId: 'beta', resourceId: 'plumber', units: 1 }],
+  });
+  const uidsIn = (xml: string, tag: string) =>
+    [...xml.matchAll(new RegExp(`<${tag}>([^<]+)</${tag}>`, 'g'))].map((m) => m[1] as string);
+
+  test('off by default: string ids serialize unchanged', () => {
+    expect(serializeMspdi(strProject())).toContain('<UID>alpha</UID>');
+  });
+
+  test('on: every UID-bearing element is an integer, numbered from 1, refs consistent', () => {
+    const idRemap: IdRemapEntry[] = [];
+    const xml = serializeMspdi(strProject(), { remapIdsToIntegers: true, idRemap });
+    for (const tag of ['UID', 'PredecessorUID', 'TaskUID', 'ResourceUID', 'CalendarUID']) {
+      expect(
+        uidsIn(xml, tag).every((u) => /^-?\d+$/.test(u)),
+        tag,
+      ).toBe(true);
+    }
+    const uid = (ns: IdRemapEntry['namespace'], id: string) =>
+      idRemap.find((e) => e.namespace === ns && e.originalId === id)?.uid;
+    expect(uid('task', 'alpha')).toBe(1);
+    expect(uid('task', 'beta')).toBe(2);
+    expect(xml).toContain(`<PredecessorUID>${uid('task', 'alpha')}</PredecessorUID>`);
+    expect(xml).toContain(`<TaskUID>${uid('task', 'beta')}</TaskUID>`);
+    expect(xml).toContain(`<ResourceUID>${uid('resource', 'plumber')}</ResourceUID>`);
+    expect(uidsIn(xml, 'CalendarUID')).toContain(String(uid('calendar', 'std')));
+    expect(uidsIn(xml, 'UID')).not.toContain('0'); // UID 0 is the project-summary row
+  });
+
+  test('round-trip with Text1: integer UIDs out, original id back via extra', () => {
+    const xml = serializeMspdi(strProject(), {
+      remapIdsToIntegers: true,
+      extendedAttributes: [{ field: 'Text1', extraKey: 'cmTaskId' }],
+    });
+    const { project } = parseMspdi(xml);
+    expect(project.tasks.find((t) => t.text === 'A')?.extra?.cmTaskId).toBe('alpha');
+    expect(project.links).toHaveLength(1);
+  });
+
+  test('dangling link is dropped + reported — remap on (no collision)', () => {
+    const p = projectOf(
+      [{ ...task('a', 'A', day(5, 8), day(5, 17), 540) }],
+      [{ id: 'l', source: 'ghost', target: 'a', type: 'FS', lag: 0 }],
+    );
+    const droppedFields: DroppedField[] = [];
+    const xml = serializeMspdi(p, { remapIdsToIntegers: true, droppedFields });
+    expect(xml).not.toContain('<PredecessorLink>');
+    expect(droppedFields.some((d) => /ghost/.test(d.value))).toBe(true);
+  });
+
+  test('dangling link is dropped + reported even with remap off (spec B2)', () => {
+    const p = projectOf(
+      [{ ...task('a', 'A', day(5, 8), day(5, 17), 540) }],
+      [{ id: 'l', source: 'ghost', target: 'a', type: 'FS', lag: 0 }],
+    );
+    const droppedFields: DroppedField[] = [];
+    expect(serializeMspdi(p, { droppedFields })).not.toContain('<PredecessorLink>');
+    expect(droppedFields.some((d) => /ghost/.test(d.value))).toBe(true);
+  });
+
+  test('dangling assignment endpoint → assignment dropped + reported', () => {
+    const p: Project = {
+      ...projectOf([{ ...task('a', 'A', day(5, 8), day(5, 17), 540) }], []),
+      resources: [{ id: 'r', name: 'R' }],
+      assignments: [{ id: 'x', taskId: 'nope', resourceId: 'r' }],
+    };
+    const droppedFields: DroppedField[] = [];
+    const xml = serializeMspdi(p, { remapIdsToIntegers: true, droppedFields });
+    expect(xml).not.toContain('<Assignment>');
+    expect(droppedFields.some((d) => /Assignment/.test(d.path))).toBe(true);
+  });
+
+  test('task calendarId naming a missing calendar → CalendarUID omitted + reported', () => {
+    const p = projectOf(
+      [{ ...task('a', 'A', day(5, 8), day(5, 17), 540), calendarId: 'nope' }],
+      [],
+    );
+    const droppedFields: DroppedField[] = [];
+    const xml = serializeMspdi(p, { remapIdsToIntegers: true, droppedFields });
+    const taskBlock = xml.slice(xml.indexOf('<Tasks>'), xml.indexOf('</Tasks>'));
+    expect(taskBlock).not.toContain('<CalendarUID>');
+    expect(droppedFields.some((d) => /CalendarUID/.test(d.path))).toBe(true);
+  });
+
+  test('baselines survive remap', () => {
+    const p = projectOf([{ ...task('a', 'A', day(5, 8), day(5, 17), 540) }], []);
+    p.baselines = [
+      {
+        index: 0,
+        capturedAt: new Date(2026, 0, 1),
+        tasks: new Map([['a', { start: day(5, 8), end: day(5, 17), duration: 540 }]]),
+      },
+    ];
+    expect(serializeMspdi(p, { remapIdsToIntegers: true })).toMatch(/<Baseline>/);
+  });
+});
+
+describe('serialize review follow-ups', () => {
+  const day = (d: number, h: number) => new Date(2026, 0, d, h);
+
+  test('Task children are emitted in MSPDI xsd:sequence order', () => {
+    const p = projectOf(
+      [
+        {
+          ...task('a', 'A', day(5, 8), day(5, 17), 540),
+          scheduleMode: 'manual',
+          unscheduled: true,
+          calendarId: 'std',
+          deadline: day(9, 17),
+          constraint: { type: 'SNET', date: day(5, 8) },
+          extra: { k: 'v' },
+        },
+        task('b', 'B', day(6, 8), day(6, 17), 540),
+      ],
+      [{ id: 'l', source: 'b', target: 'a', type: 'FS', lag: 0 }],
+    );
+    p.baselines = [
+      {
+        index: 0,
+        capturedAt: day(1, 8),
+        tasks: new Map([['a', { start: day(5, 8), end: day(5, 17), duration: 540 }]]),
+      },
+    ];
+    const xml = serializeMspdi(p, { extendedAttributes: [{ field: 'Text1', extraKey: 'k' }] });
+    const block = xml.slice(xml.indexOf('<Task>'), xml.indexOf('</Task>'));
+    const order = [...block.matchAll(/^\s{6}<([A-Za-z]+)>/gm)].map((m) => m[1]);
+    const XSD = [
+      'UID',
+      'ID',
+      'Name',
+      'Manual',
+      'IsNull',
+      'OutlineLevel',
+      // As MS Project's own save orders them (desktop run 11).
+      'StartText',
+      'FinishText',
+      'Start',
+      'Finish',
+      'Duration',
+      // As MS Project's own save of a manual task orders them (desktop run 8).
+      'ManualStart',
+      'ManualFinish',
+      'ManualDuration',
+      'DurationFormat',
+      'FreeformDurationFormat',
+      'Estimated',
+      'Milestone',
+      'Summary',
+      'PercentComplete',
+      'RemainingDuration',
+      'ConstraintType',
+      'CalendarUID',
+      'ConstraintDate',
+      'Deadline',
+      'PredecessorLink',
+      'ExtendedAttribute',
+      'Baseline',
+    ];
+    const positions = order.map((el) => XSD.indexOf(el as string));
+    expect(positions.every((p) => p >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((x, y) => x - y));
+  });
+
+  test('duplicate ids under remap are reported (they would share a UID)', () => {
+    const p = projectOf(
+      [task('a', 'A', day(5, 8), day(5, 17), 540), task('a', 'A2', day(6, 8), day(6, 17), 540)],
+      [],
+    );
+    const droppedFields: DroppedField[] = [];
+    serializeMspdi(p, { remapIdsToIntegers: true, droppedFields });
+    expect(droppedFields.some((d) => /duplicate/i.test(d.value))).toBe(true);
+  });
+
+  test('a non-primitive mapped extra value is not written as [object Object]', () => {
+    const p = projectOf(
+      [{ ...task('a', 'A', day(5, 8), day(5, 17), 540), extra: { k: { nested: 1 } } }],
+      [],
+    );
+    const droppedFields: DroppedField[] = [];
+    const xml = serializeMspdi(p, {
+      extendedAttributes: [{ field: 'Text1', extraKey: 'k' }],
+      droppedFields,
+    });
+    expect(xml).not.toContain('[object Object]');
+    expect(droppedFields.some((d) => /extra\.k/.test(d.path))).toBe(true);
+  });
+
+  test('a baseline snapshot for a task not in the project is reported', () => {
+    const p = projectOf([task('a', 'A', day(5, 8), day(5, 17), 540)], []);
+    p.baselines = [
+      {
+        index: 0,
+        capturedAt: day(1, 8),
+        tasks: new Map([['ghost', { start: day(5, 8), end: day(5, 17), duration: 540 }]]),
+      },
+    ];
+    const droppedFields: DroppedField[] = [];
+    serializeMspdi(p, { droppedFields });
+    expect(droppedFields.some((d) => /ghost/.test(d.value))).toBe(true);
+  });
+});
+
+describe('ExtendedAttributes — second-pass review (2026-10-16)', () => {
+  const one = (extra: Record<string, unknown>) =>
+    projectOf(
+      [{ ...task('t1', 'A', new Date(2026, 0, 5, 8), new Date(2026, 0, 5, 17), 540), extra }],
+      [],
+    );
+
+  test('alias ≠ extraKey survives a second serialize → parse hop', () => {
+    const opts = {
+      extendedAttributes: [{ field: 'Text1' as const, extraKey: 'cmTaskId', alias: 'CM Task Id' }],
+    };
+    const hop1 = parseMspdi(serializeMspdi(one({ cmTaskId: 'abc' }), opts)).project;
+    // Parse keys onto the alias (self-describing file).
+    expect(hop1.tasks[0]!.extra?.['CM Task Id']).toBe('abc');
+    const droppedFields: import('./types.js').DroppedField[] = [];
+    const hop2 = parseMspdi(serializeMspdi(hop1, { ...opts, droppedFields })).project;
+    expect(hop2.tasks[0]!.extra?.['CM Task Id']).toBe('abc');
+    expect(droppedFields.some((d) => /CM Task Id/.test(d.path))).toBe(false);
+  });
+
+  test('prototype keys are not valid fields', () => {
+    for (const field of ['toString', '__proto__', 'constructor']) {
+      expect(() =>
+        serializeMspdi(one({ k: 'x' }), {
+          extendedAttributes: [{ field: field as `Text${number}`, extraKey: 'k' }],
+        }),
+      ).toThrow(/unknown extended-attribute field/);
+    }
+  });
+
+  test('empty or padded alias / extraKey are config errors', () => {
+    const bad = [
+      { field: 'Text1' as const, extraKey: '' },
+      { field: 'Text1' as const, extraKey: ' k ' },
+      { field: 'Text1' as const, extraKey: 'k', alias: '' },
+      { field: 'Text1' as const, extraKey: 'k', alias: '   ' },
+      { field: 'Text1' as const, extraKey: 'k', alias: ' k ' },
+    ];
+    for (const m of bad) {
+      expect(() => serializeMspdi(one({ k: 'x' }), { extendedAttributes: [m] })).toThrow();
+    }
+  });
+
+  test('a resource-class definition does not shadow the task Text1 definition', () => {
+    const xml = `<?xml version="1.0"?><Project xmlns="http://schemas.microsoft.com/project"><Name>X</Name>
+      <ExtendedAttributes>
+        <ExtendedAttribute><FieldID>205520904</FieldID><FieldName>Text1</FieldName></ExtendedAttribute>
+        <ExtendedAttribute><FieldID>188743731</FieldID><FieldName>Text1</FieldName></ExtendedAttribute>
+      </ExtendedAttributes>
+      <Tasks><Task><UID>1</UID><ID>1</ID><Name>A</Name><Start>2026-01-05T08:00:00</Start><Finish>2026-01-05T17:00:00</Finish><Duration>PT8H0M0S</Duration>
+        <ExtendedAttribute><FieldID>188743731</FieldID><Value>v</Value></ExtendedAttribute></Task></Tasks></Project>`;
+    const { project, droppedFields } = parseMspdi(xml);
+    expect(project.tasks[0]!.extra?.Text1).toBe('v');
+    expect(droppedFields.some((d) => /ExtendedAttribute/.test(d.path))).toBe(false);
+  });
+
+  test('an empty task <ExtendedAttribute/> is reported as malformed, not as a lookup value', () => {
+    const xml = `<?xml version="1.0"?><Project xmlns="http://schemas.microsoft.com/project"><Name>X</Name>
+      <Tasks><Task><UID>1</UID><ID>1</ID><Name>A</Name><Start>2026-01-05T08:00:00</Start><Finish>2026-01-05T17:00:00</Finish><Duration>PT8H0M0S</Duration>
+        <ExtendedAttribute></ExtendedAttribute></Task></Tasks></Project>`;
+    const { droppedFields } = parseMspdi(xml);
+    const d = droppedFields.find((x) => /ExtendedAttribute/.test(x.path));
+    expect(d?.value).toMatch(/malformed/);
   });
 });

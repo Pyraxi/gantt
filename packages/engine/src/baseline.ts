@@ -6,6 +6,7 @@
 // (per ADR-003). We match MS Project's data model: up to 11 baselines
 // (BaselineIndex 0..10) per project.
 
+import { createCalendarResolver } from './calendars/effective';
 import type {
   Baseline,
   BaselineIndex,
@@ -89,9 +90,14 @@ export function getTaskBaselineVarianceAll(
     );
   }
 
+  // Each task's variance in its own effective calendar (ADR-011) — as
+  // compareSchedules measures — so an elapsed task slipping over a weekend
+  // reads as the 48 h it is, not 0.
+  const resolver = createCalendarResolver(project);
   const result = new Map<TaskId, TaskBaselineVariance>();
   for (const task of project.tasks) {
-    const variance = getTaskBaselineVariance(task, baseline, calendar);
+    const own = task.type === 'summary' ? calendar : resolver.effectiveFor(task).calendar;
+    const variance = getTaskBaselineVariance(task, baseline, own);
     if (variance !== undefined) {
       result.set(task.id, variance);
     }

@@ -13,10 +13,53 @@ export {
   getTaskBaselineVarianceAll,
 } from './baseline.js';
 // NZ public holidays + default calendar
+export type { CalendarFallback, EffectiveCalendar } from './calendars/effective.js';
+export {
+  createCalendarResolver,
+  ELAPSED_CALENDAR,
+  getEffectiveCalendar,
+  resolveCalendar,
+} from './calendars/effective.js';
 export type { NZDefaultCalendarOptions, NZRegion } from './calendars/nz-holidays.js';
 export { nzDefaultCalendar, nzPublicHolidays } from './calendars/nz-holidays.js';
+export type {
+  CombinedAnalysis,
+  CombinedPartAnalysis,
+  CombinedProject,
+  CombineNote,
+  CombineOptions,
+  CombinePart,
+  CrossProjectLink,
+} from './combine.js';
+export { analyseCombined, combineProjects } from './combine.js';
+export type {
+  Change,
+  CompareSchedulesOptions,
+  Delta,
+  LinkComparison,
+  ScheduleComparison,
+  TaskChanges,
+  TaskComparison,
+} from './compare.js';
+export { baselineFrom, compareSchedules } from './compare.js';
+export type { DrivingAnalysis, FloatPath, LinkDriving, TaskPath } from './driving.js';
+export {
+  analyseDriving,
+  getDrivenPath,
+  getDrivingPath,
+  getFloatPaths,
+  getLinkDriving,
+  getLongestPath,
+} from './driving.js';
 export type { DurationUnitMinutes } from './duration-units.js';
-export { DEFAULT_DURATION_UNITS, formatDuration, parseDuration } from './duration-units.js';
+export {
+  DEFAULT_DURATION_UNITS,
+  ELAPSED_DURATION_UNITS,
+  formatDuration,
+  formatElapsedDuration,
+  parseDuration,
+  parseElapsedDuration,
+} from './duration-units.js';
 export * from './editing/command-history.js';
 // Editing model (command-pattern; ADR-006)
 export type { EditCommand } from './editing/commands.js';
@@ -41,14 +84,35 @@ export {
   updateLink,
   updateTask,
 } from './editing/factories.js';
+export * from './editing/predecessors.js';
 export type { SubtreeClipboard } from './editing/subtree.js';
 export { copySubtree, pasteSubtree } from './editing/subtree.js';
+export type { GroupProjectOptions } from './grouping.js';
+export { computeWbs, filterProject, groupProject } from './grouping.js';
+export type { ExtendedAttributeMapping, IdRemapEntry } from './mspdi/extended-attributes.js';
 // MSPDI XML interop
+export type { OutlineCodeField, OutlineCodeMapping } from './mspdi/outline-codes.js';
 export { parseMspdi } from './mspdi/parse.js';
 export { serializeMspdi } from './mspdi/serialize.js';
 export type { DroppedField, MspdiParseResult, MspdiSerializeOptions } from './mspdi/types.js';
 // Scheduling engine
-export { schedule } from './schedule.js';
+export { progressPoints } from './progress-line.js';
+export type {
+  CheckScheduleOptions,
+  ScheduleCheck,
+  ScheduleCheckId,
+  ScheduleCheckResult,
+} from './quality.js';
+export { checkSchedule } from './quality.js';
+export {
+  type OverAllocation,
+  overAllocations,
+  type ResourceUsage,
+  type ResourceUsageOptions,
+  resourceUsage,
+  type UsagePeriod,
+} from './resource-usage.js';
+export { lagMinutes, schedule } from './schedule.js';
 export { topologicalSort } from './topological-sort.js';
 // Data model + chrome config types
 export type {
@@ -60,6 +124,8 @@ export type {
   Calendar,
   CalendarException,
   CalendarId,
+  CodeType,
+  CodeValue,
   Constraint,
   ConstraintType,
   DayOfWeek,
@@ -102,4 +168,5 @@ export {
   snapToPreviousWorkingMoment,
   subtractWorkingMinutes,
   workingMinutesBetween,
+  workingMinutesPerDay,
 } from './working-time.js';

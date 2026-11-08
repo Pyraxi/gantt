@@ -52,6 +52,24 @@ For read-only use, drop `useEditableProject` and pass a `Project` straight to `<
 
 The component ships its own CSS (auto-injected). Engine-specific visual signals use the `construction-gantt-*` class prefix — e.g. per-baseline ghost rows are `construction-gantt-baseline-${N}` (indices 0–10), which you can override with higher-specificity rules.
 
+### Theming colours
+
+Bars and chrome read SVAR's `--wx-*` CSS custom properties; the in-bar status pills read `--cg-pill-<kind>-bg` / `--cg-pill-<kind>-color` (kinds: `slip`, `ahead`, `float`, `late`, `deadline`, `deadline-missed`). SVAR's Willow theme declares its tokens **on its own `.wx-willow-theme` element inside the component**, so target that element — tokens set on an outer wrapper alone lose to Willow's declaration:
+
+```css
+.my-schedule .wx-willow-theme {
+  --wx-gantt-task-color: #d6c3a5;      /* task bar track */
+  --wx-gantt-task-fill-color: #a88b5e; /* task bar % complete */
+  --wx-gantt-task-border-color: #3a3632;
+  --wx-gantt-summary-color: #5b5650;   /* also -fill-color / -border-color */
+  --wx-color-primary: #3a3632;         /* buttons (+ New task), displayOptions checkboxes, focus */
+  --cg-pill-float-bg: #ece6dc;
+  --cg-pill-float-color: #5b5650;
+}
+```
+
+The engine's critical path keeps its red.
+
 ## License
 
 MIT © Rips Cassels / Pyraxis. See [LICENSE.md](./LICENSE.md).

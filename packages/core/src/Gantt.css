@@ -6,6 +6,37 @@
   background: rgba(241, 245, 249, 0.65);
 }
 
+/* Vertical markers, drawn by MarkersLayer in SVAR's chart area (SVAR's free
+ * store doesn't draw `markers`). A 2px line the height of the chart; the
+ * variant class colours both the line and its label. */
+.construction-gantt-markers {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+.construction-gantt-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: #64748b;
+  color: #ffffff;
+}
+.construction-gantt-marker-label {
+  position: absolute;
+  top: 4px;
+  left: 3px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  background: inherit;
+  color: inherit;
+}
+
 /* Today-line marker. Red 2px vertical line; high-priority visual cue for
  * what the date cursor is on. */
 .construction-gantt-marker-today {
@@ -113,6 +144,16 @@
 
 .wx-task:hover .construction-gantt-drag-handle {
   opacity: 1;
+}
+
+/* Grid-cell text wrapper (CellText) is a full-width block for ellipsis + a
+ * full-cell click target, so SVAR's flex justify-content no longer aligns it.
+ * Re-apply the column `align` from the class SVAR puts on the body cell. */
+.wx-cell.wx-text-right > .construction-gantt-cell-text {
+  text-align: right;
+}
+.wx-cell.wx-text-center > .construction-gantt-cell-text {
+  text-align: center;
 }
 
 /* Deadline overrun — sectional-completion slippage (NZS 3910). */

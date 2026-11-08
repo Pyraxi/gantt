@@ -1,5 +1,10 @@
-import { describe, expect, it } from 'vitest';
-import { formatDuration, parseDuration } from './duration-units.js';
+import { describe, expect, it, test } from 'vitest';
+import {
+  formatDuration,
+  formatElapsedDuration,
+  parseDuration,
+  parseElapsedDuration,
+} from './duration-units.js';
 
 describe('parseDuration', () => {
   it('treats a bare number as days (back-compat)', () => {
@@ -84,5 +89,21 @@ describe('formatDuration', () => {
 
   it('formats zero as 0d (milestone)', () => {
     expect(formatDuration(0)).toBe('0d');
+  });
+});
+
+describe('elapsed durations (MS Project ed)', () => {
+  test('format: 24 h days, e-prefixed units', () => {
+    expect(formatElapsedDuration(4320)).toBe('3ed');
+    expect(formatElapsedDuration(2160)).toBe('36eh');
+    expect(formatElapsedDuration(30)).toBe('30em');
+    expect(formatElapsedDuration(0)).toBe('0ed');
+  });
+  test('parse: with or without the e; a bare number is days', () => {
+    for (const s of ['3ed', '3 edays', '3d', '3', ' 3 ED '])
+      expect(parseElapsedDuration(s)).toBe(4320);
+    expect(parseElapsedDuration('36eh')).toBe(2160);
+    expect(parseElapsedDuration('1ew')).toBe(10080);
+    expect(parseElapsedDuration('soon')).toBeNull();
   });
 });

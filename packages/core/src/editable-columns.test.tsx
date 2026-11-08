@@ -238,3 +238,20 @@ describe('buildCustomEditableCell (custom-column onCellEdit)', () => {
     expect(onCellEdit).not.toHaveBeenCalled();
   });
 });
+
+describe('duration units follow the calendar day length (9 h day)', () => {
+  const MPD = 540;
+  test('a 1-day row in a 9 h calendar reads "1d" (not "9h") and seeds "1d"', () => {
+    const activateCell = vi.fn();
+    const editStateRef = { current: { activeCell: undefined, activateCell } } as never;
+    const onTaskEditRef = { current: undefined } as never;
+    const Cell = buildEditableCell('duration', editStateRef, onTaskEditRef, undefined, MPD) as (p: {
+      row: unknown;
+    }) => ReactNode;
+    const row = { id: 'x', type: 'task', duration: 1, progress: 0 };
+    const { container } = render(Cell({ row }));
+    expect(container.textContent).toBe('1d');
+    fireEvent.click(container.querySelector('span[style]') as Element);
+    expect(activateCell).toHaveBeenCalledWith('x', 'duration', '1d');
+  });
+});

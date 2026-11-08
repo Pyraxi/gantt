@@ -5,7 +5,7 @@
 // component stays trivially testable / swappable.
 
 import type { FC } from 'react';
-import type { DisplayOptionsState } from './display-options.js';
+import type { DisplayOptionsSignal, DisplayOptionsState } from './display-options.js';
 
 export interface DisplayOptionsBarProps {
   state: DisplayOptionsState;
@@ -14,7 +14,11 @@ export interface DisplayOptionsBarProps {
   showColumns: boolean;
   showSignals: boolean;
   onToggleColumn: (id: string) => void;
-  onToggleSignal: (signal: 'critical' | 'slack' | 'deadline') => void;
+  onToggleSignal: (signal: DisplayOptionsSignal) => void;
+  /** Show the Badges toggle (the host passes `taskBadges`). */
+  hasBadges?: boolean;
+  /** Show the Previous starts toggle (the host passes `previousStart`). */
+  hasPreviousStarts?: boolean;
 }
 
 export const DisplayOptionsBar: FC<DisplayOptionsBarProps> = ({
@@ -24,6 +28,8 @@ export const DisplayOptionsBar: FC<DisplayOptionsBarProps> = ({
   showSignals,
   onToggleColumn,
   onToggleSignal,
+  hasBadges = false,
+  hasPreviousStarts = false,
 }) => {
   const box = (checked: boolean, label: string, on: () => void) => (
     <label
@@ -36,7 +42,12 @@ export const DisplayOptionsBar: FC<DisplayOptionsBarProps> = ({
         marginRight: 12,
       }}
     >
-      <input type="checkbox" checked={checked} onChange={on} />
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={on}
+        style={{ accentColor: 'var(--wx-color-primary)' }}
+      />
       {label}
     </label>
   );
@@ -61,6 +72,10 @@ export const DisplayOptionsBar: FC<DisplayOptionsBarProps> = ({
       {showSignals && box(state.critical, 'Critical', () => onToggleSignal('critical'))}
       {showSignals && box(state.slack, 'Float/Slack', () => onToggleSignal('slack'))}
       {showSignals && box(state.deadline, 'Deadline', () => onToggleSignal('deadline'))}
+      {showSignals && hasBadges && box(state.badges, 'Badges', () => onToggleSignal('badges'))}
+      {showSignals &&
+        hasPreviousStarts &&
+        box(state.previousStarts, 'Previous starts', () => onToggleSignal('previousStarts'))}
     </div>
   );
 };

@@ -40,25 +40,35 @@ describe('toSvarZoom', () => {
     expect(result.levels![0].scales.some((s) => s.unit === 'week')).toBe(true);
   });
 
+  // SVAR's level index runs coarse → fine (zoom-in = index + 1), whatever the
+  // config order — see resolveZoomLevels.
+  const unitAt = (r: ReturnType<typeof toSvarZoom>, i = r.level ?? -1) =>
+    r.levels?.[i]?.scales[1]?.unit;
+
+  test('levels are ordered coarse → fine regardless of config order', () => {
+    const result = toSvarZoom({ levels: ['day', 'month', 'week'] });
+    expect(result.levels?.map((l) => l.scales[1]?.unit)).toEqual(['month', 'week', 'day']);
+  });
+
   test('default level index points to the default name', () => {
     const result = toSvarZoom({ levels: ['day', 'week', 'month'], default: 'month' });
-    expect(result.level).toBe(2);
+    expect(unitAt(result)).toBe('month');
   });
 
-  test('default level index is 0 when default is omitted', () => {
-    const result = toSvarZoom({ levels: ['day', 'week'] });
-    expect(result.level).toBe(0);
+  test('default omitted → the first configured level', () => {
+    expect(unitAt(toSvarZoom({ levels: ['day', 'week'] }))).toBe('day');
+    expect(unitAt(toSvarZoom({ levels: ['month', 'day'] }))).toBe('month');
   });
 
-  test('default not in levels clamps to 0 instead of -1 (indexOf guard)', () => {
+  test('default not in levels → the first configured level (never index -1)', () => {
     const result = toSvarZoom({ levels: ['day', 'week'], default: 'month' });
-    expect(result.level).toBe(0);
+    expect(unitAt(result)).toBe('day');
   });
 
-  test('omitting levels falls back to [day, week, month]', () => {
+  test('omitting levels falls back to [day, week, month], opening at day', () => {
     const result = toSvarZoom({});
     expect(result.levels).toHaveLength(3);
-    expect(result.level).toBe(0);
+    expect(unitAt(result)).toBe('day');
   });
 
   test('each level has minCellWidth, maxCellWidth, and at least one scale', () => {

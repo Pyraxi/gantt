@@ -10,7 +10,8 @@
       "!**/dist",
       "!**/node_modules",
       "!**/storybook-static",
-      "!.changeset"
+      "!.changeset",
+      "!docs/superpowers/tools"
     ]
   },
   "formatter": {

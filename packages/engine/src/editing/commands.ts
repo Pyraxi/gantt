@@ -263,7 +263,10 @@ export class UpdateLinkCommand implements EditCommand {
     const idx = project.links.indexOf(target);
     const links = [...project.links];
     this.originalLink = target;
-    links[idx] = Object.assign({}, target, this.patch);
+    const next: Link = Object.assign({}, target, this.patch);
+    // `lagPercent` overrides `lag`: setting a plain lag replaces a percent one.
+    if ('lag' in this.patch && !('lagPercent' in this.patch)) delete next.lagPercent;
+    links[idx] = next;
     return { ...project, links };
   }
 
@@ -272,7 +275,15 @@ export class UpdateLinkCommand implements EditCommand {
       throw new EditError(`inverse: apply() was not called on this command`, this.kind);
     }
     const previousPatch: Partial<Link> = {};
-    for (const key of Object.keys(this.patch)) {
+    const keys = Object.keys(this.patch);
+    if (
+      'lag' in this.patch &&
+      !keys.includes('lagPercent') &&
+      this.originalLink.lagPercent !== undefined
+    ) {
+      keys.push('lagPercent');
+    }
+    for (const key of keys) {
       const k = key as keyof Link;
       (previousPatch as Record<keyof Link, unknown>)[k] = (
         this.originalLink as Record<keyof Link, unknown>

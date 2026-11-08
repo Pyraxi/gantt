@@ -1,6 +1,6 @@
 import { act, renderHook } from '@testing-library/react';
 import { describe, expect, test, vi } from 'vitest';
-import { useEditState } from './useEditState.js';
+import { durationUnitsFor, parseFieldValue, useEditState } from './useEditState.js';
 
 describe('useEditState', () => {
   test('starts with no active cell', () => {
@@ -163,7 +163,7 @@ describe('useEditState', () => {
     expect(onTaskEdit).not.toHaveBeenCalled();
   });
 
-  test('commitCell with invalid duration string emits empty patch', () => {
+  test('commitCell with an invalid duration string sends no patch (parity row 16)', () => {
     const { result } = renderHook(() => useEditState());
     const onTaskEdit = vi.fn();
     act(() => {
@@ -175,10 +175,10 @@ describe('useEditState', () => {
     act(() => {
       result.current.commitCell(onTaskEdit);
     });
-    expect(onTaskEdit).toHaveBeenCalledWith('task-1', {});
+    expect(onTaskEdit).not.toHaveBeenCalled();
   });
 
-  test('commitCell with invalid scheduleMode emits empty patch', () => {
+  test('commitCell with an invalid scheduleMode sends no patch (parity row 16)', () => {
     const { result } = renderHook(() => useEditState());
     const onTaskEdit = vi.fn();
     act(() => {
@@ -190,6 +190,53 @@ describe('useEditState', () => {
     act(() => {
       result.current.commitCell(onTaskEdit);
     });
-    expect(onTaskEdit).toHaveBeenCalledWith('task-1', {});
+    expect(onTaskEdit).not.toHaveBeenCalled();
+  });
+});
+
+describe('parseFieldValue — calendar day length', () => {
+  test('"3d" is three working days of the calendar, not three 8 h days', async () => {
+    const { parseFieldValue, durationUnitsFor } = await import('./useEditState');
+    expect(parseFieldValue('duration', '3d', durationUnitsFor(540))).toEqual({ duration: 1620 });
+    expect(parseFieldValue('duration', '1w', durationUnitsFor(540))).toEqual({ duration: 2700 });
+    expect(parseFieldValue('duration', '3d')).toEqual({ duration: 1440 }); // default 8 h
+  });
+
+  test('useEditState(units) commits in those units', async () => {
+    const { useEditState, durationUnitsFor } = await import('./useEditState');
+    const onTaskEdit = vi.fn();
+    const { result } = renderHook(() => useEditState(durationUnitsFor(540)));
+    act(() => result.current.activateCell('a', 'duration', '1d'));
+    act(() => result.current.setValue('2d'));
+    act(() => void result.current.commitCell(onTaskEdit));
+    expect(onTaskEdit).toHaveBeenCalledWith('a', { duration: 1080 });
+  });
+});
+
+describe('elapsed durations (Task.durationElapsed)', () => {
+  test('parseFieldValue: days are 24 h for an elapsed task, with or without the e', () => {
+    const units = durationUnitsFor(540);
+    expect(parseFieldValue('duration', '3d', units, true)).toEqual({ duration: 4320 });
+    expect(parseFieldValue('duration', '3ed', units, true)).toEqual({ duration: 4320 });
+    expect(parseFieldValue('duration', '3d', units)).toEqual({ duration: 1620 });
+  });
+
+  test('commit uses the task’s elapsed flag', () => {
+    const onTaskEdit = vi.fn();
+    const { result } = renderHook(() => useEditState(durationUnitsFor(540), (id) => id === 'cure'));
+    act(() => result.current.activateCell('cure', 'duration', '3ed'));
+    act(() => result.current.setValue('2'));
+    act(() => {
+      result.current.commitCell(onTaskEdit);
+    });
+    act(() => result.current.activateCell('pour', 'duration', '3d'));
+    act(() => result.current.setValue('2'));
+    act(() => {
+      result.current.commitCell(onTaskEdit);
+    });
+    expect(onTaskEdit.mock.calls).toEqual([
+      ['cure', { duration: 2880 }],
+      ['pour', { duration: 1080 }],
+    ]);
   });
 });

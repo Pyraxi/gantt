@@ -1,4 +1,4 @@
-import type { Project, Task } from '@pyraxi/cpm-engine';
+import { filterTasksByVisibility, type Project, type Task, type TaskId } from '@pyraxi/cpm-engine';
 import ExcelJS from 'exceljs';
 import type { XlsxColumn, XlsxExportOptions } from './types.js';
 
@@ -19,7 +19,8 @@ export const DEFAULT_XLSX_COLUMNS: XlsxColumn[] = [
     header: 'Total slack (working minutes)',
     value: (t: Task) => t.computed?.totalSlack ?? 0,
   },
-  { header: 'Progress (%)', value: 'progress' },
+  // Whole percent: imported progress can be fractional (actual ÷ duration).
+  { header: 'Progress (%)', value: (t: Task) => Math.round(t.progress ?? 0) },
   {
     header: 'Parent',
     value: (t: Task) => t.parent ?? '',
@@ -65,15 +66,27 @@ function readCell(task: Task, column: XlsxColumn): SheetCell {
 
 export async function exportXLSX({
   scheduled,
+  visibleTaskIds,
   options,
 }: {
   scheduled: Project;
+  /** The screen's filter (`<Gantt visibleTaskIds>`), used with `options.scope: 'visible'`. */
+  visibleTaskIds?: ReadonlySet<TaskId>;
   options: XlsxExportOptions;
 }): Promise<Blob> {
   const columns = options.columns ?? DEFAULT_XLSX_COLUMNS;
   const sheetName = options.sheetName ?? 'Programme';
 
-  const rows = buildSheetRows(scheduled, columns);
+  const rows = buildSheetRows(
+    {
+      ...scheduled,
+      tasks: filterTasksByVisibility(
+        scheduled.tasks,
+        options.scope === 'visible' ? visibleTaskIds : undefined,
+      ),
+    },
+    columns,
+  );
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet(sheetName);
   // rows[0] is the header; each subsequent row is a task. `addRows` accepts an

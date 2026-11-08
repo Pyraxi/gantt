@@ -10,6 +10,7 @@ import type {
   BaselineTaskSnapshot,
   Calendar,
   CalendarException,
+  CodeType,
   DayOfWeek,
   DependencyType,
   Link,
@@ -20,7 +21,12 @@ import type {
   TaskType,
   WorkInterval,
 } from '../types.js';
+import { TASK_FIELD_ID_MAX, TASK_FIELD_ID_MIN } from './extended-attributes.js';
+import { OUTLINE_CODE_FIELD_BY_ID } from './outline-codes.js';
 import type { DroppedField, MspdiParseResult } from './types.js';
+
+/** MS Project's "no resource" sentinel on unassigned-task placeholder assignments. */
+export const UNASSIGNED_RESOURCE_UID = '-65535';
 
 // Field names we know about and either map or intentionally ignore on parse.
 // Everything outside this set lands in `droppedFields`.
@@ -31,8 +37,17 @@ import type { DroppedField, MspdiParseResult } from './types.js';
 // engine recomputes the equivalent fields. Listing them here keeps
 // `droppedFields` focused on genuinely-unknown elements rather than
 // recompute-able noise.
+/** MSPDI `DurationFormat` / `LagFormat` codes for elapsed units (incl. estimated). */
+const ELAPSED_FORMATS = new Set([4, 6, 8, 10, 12, 36, 38, 40, 42, 44]);
+
+/** A manual task's text in place of a date (MS Project: "TBD"). */
+const TEXT_DATE_FIELDS = new Set(['StartText', 'FinishText', 'DurationText']);
+const hasText = (v: unknown): boolean => typeof v === 'string' && v.trim() !== '';
+
 const KNOWN_TASK_FIELDS = new Set([
   // Mapped — read into the internal Task shape
+  'ActualStart',
+  'ActualFinish',
   'UID',
   'ID',
   'Name',
@@ -47,6 +62,8 @@ const KNOWN_TASK_FIELDS = new Set([
   'OutlineLevel',
   'PredecessorLink',
   'Baseline',
+  'ExtendedAttribute',
+  'OutlineCode', // → Task.codes (outline codes)
   // Allowed but ignored (default-bearing structure or recompute-able state)
   'Type', // task type code; only Milestone + Summary flags affect us
   // IsNull is now mapped: IsNull=1 → Task.unscheduled=true (ADR-007)
@@ -60,7 +77,10 @@ const KNOWN_TASK_FIELDS = new Set([
   'PhysicalPercentComplete',
   'EarnedValueMethod',
   'DurationFormat',
+  'FreeformDurationFormat', // a manual task's; DurationFormat says the same
   'Work',
+  'Stop',
+  'Resume',
   'ResumeValid',
   'EffortDriven',
   'Recurring',
@@ -103,6 +123,11 @@ const KNOWN_TASK_FIELDS = new Set([
   'BCWP',
   // Manual schedule mode + per-task calendar override — mapped (F-3)
   'Manual',
+  // A manual task's own dates: the same as Start / Finish / Duration in MS
+  // Project's saves and ours.
+  'ManualStart',
+  'ManualFinish',
+  'ManualDuration',
   'CalendarUID',
   'LevelAssignments',
   'LevelingCanSplit',
@@ -212,12 +237,17 @@ export function parseMspdi(xml: string): MspdiParseResult {
     isArray: (_name, jpath) =>
       jpath === 'Project.Tasks.Task' ||
       jpath.endsWith('.PredecessorLink') ||
+      jpath.endsWith('.ExtendedAttribute') ||
       jpath === 'Project.Calendars.Calendar' ||
       jpath === 'Project.Resources.Resource' ||
       jpath === 'Project.Assignments.Assignment' ||
       jpath.endsWith('.WeekDays.WeekDay') ||
       jpath.endsWith('.WorkingTimes.WorkingTime') ||
-      jpath === 'Project.Tasks.Task.Baseline',
+      jpath === 'Project.Tasks.Task.Baseline' ||
+      jpath === 'Project.Tasks.Task.OutlineCode' ||
+      jpath === 'Project.OutlineCodes.OutlineCode' ||
+      jpath === 'Project.OutlineCodes.OutlineCode.Values.Value' ||
+      jpath === 'Project.OutlineCodes.OutlineCode.Masks.Mask',
     parseTagValue: false, // keep everything as strings; we coerce per-field
     trimValues: true,
   });
@@ -257,10 +287,62 @@ export function parseMspdi(xml: string): MspdiParseResult {
       })()
     : new Date(0);
 
+  // Project-level ExtendedAttributes definitions: FieldID → key (Alias, else
+  // FieldName, else the FieldID). First-seen wins on a duplicate key. Task
+  // values below map onto Task.extra[key]. Self-describing → no parse config.
+  const eaDefKeyByFieldId = new Map<number, string>();
+  const eaSeenKeys = new Set<string>();
+  // Outline codes' paired definitions: FieldID → alias, Ltuid → FieldID.
+  const ocAliasByFieldId = new Map<number, string>();
+  const ocFieldIdByLtuid = new Map<string, number>();
+  const rawEaDefs = (root.ExtendedAttributes as Record<string, unknown> | undefined)
+    ?.ExtendedAttribute;
+  const eaDefList = Array.isArray(rawEaDefs) ? rawEaDefs : rawEaDefs ? [rawEaDefs] : [];
+  for (const [i, d] of eaDefList.entries()) {
+    const def = d as Record<string, unknown>;
+    const fid = Number(def.FieldID);
+    if (!Number.isFinite(fid)) continue;
+    // Only task-class fields carry Task.extra values. Resource/assignment
+    // definitions (other FieldID ranges) must not claim a key — resource Text1
+    // listed first would otherwise shadow task Text1.
+    if (fid < TASK_FIELD_ID_MIN || fid > TASK_FIELD_ID_MAX) continue;
+    // An empty <Alias/> is "no alias" — never key values onto extra[''].
+    const alias = def.Alias !== undefined ? String(def.Alias) : '';
+    // An outline code's paired definition names a code type, not a Text field.
+    if (OUTLINE_CODE_FIELD_BY_ID.has(fid)) {
+      if (alias !== '' && !ocAliasByFieldId.has(fid)) ocAliasByFieldId.set(fid, alias);
+      if (def.Ltuid !== undefined) ocFieldIdByLtuid.set(String(def.Ltuid).toUpperCase(), fid);
+      continue;
+    }
+    const key =
+      alias !== '' ? alias : def.FieldName !== undefined ? String(def.FieldName) : String(fid);
+    if (eaDefKeyByFieldId.has(fid) || eaSeenKeys.has(key)) {
+      droppedFields.push({
+        path: `Project.ExtendedAttributes.ExtendedAttribute[${i}]`,
+        value: `definition FieldID ${fid} ignored: key "${key}" already defined (first wins)`,
+        reason: 'unsupported-element',
+      });
+      continue;
+    }
+    eaDefKeyByFieldId.set(fid, key);
+    eaSeenKeys.add(key);
+  }
+
+  const { codeTypes, outlineCodeByFieldId } = parseOutlineCodes(
+    root.OutlineCodes as Record<string, unknown> | undefined,
+    ocAliasByFieldId,
+    ocFieldIdByLtuid,
+    droppedFields,
+  );
+
   const rawTasks: unknown[] = root.Tasks?.Task ?? [];
   if (!Array.isArray(rawTasks)) {
     throw new Error('parseMspdi: <Tasks> contained a non-array Task collection (malformed)');
   }
+
+  // UIDs of rows skipped as MS Project's project-summary row (F-13), so links
+  // from them are dropped + reported rather than left dangling.
+  const skippedSummaryUids = new Set<string>();
 
   for (let i = 0; i < rawTasks.length; i++) {
     const raw = rawTasks[i] as Record<string, unknown>;
@@ -269,6 +351,33 @@ export function parseMspdi(xml: string): MspdiParseResult {
     // Map the supported fields.
     const uid = String(raw.UID ?? raw.ID ?? '');
     if (!uid) throw new Error(`parseMspdi: ${taskPath} missing UID and ID`);
+
+    // MS Project emits the whole-project summary as UID 0 at OutlineLevel 0.
+    // It is not a schedulable task (and a host merging by id must never see it).
+    if (uid === '0' && String(raw.OutlineLevel ?? '') === '0') {
+      skippedSummaryUids.add(uid);
+      droppedFields.push({
+        path: taskPath,
+        value: 'project-summary row (UID 0) skipped',
+        reason: 'unsupported-element',
+      });
+      continue;
+    }
+    // A blank row in MS Project: IsNull with no name and no outline level. It
+    // isn't a task, and reading it as level 1 would orphan every task after it.
+    if (
+      String(raw.IsNull ?? '0') === '1' &&
+      String(raw.Name ?? '') === '' &&
+      raw.OutlineLevel === undefined
+    ) {
+      skippedSummaryUids.add(uid);
+      droppedFields.push({
+        path: taskPath,
+        value: 'blank row skipped',
+        reason: 'unsupported-element',
+      });
+      continue;
+    }
 
     const name = String(raw.Name ?? '');
     // F7 fix: guard against absent Start/Finish on IsNull tasks. parseMspdiDate('')
@@ -322,17 +431,160 @@ export function parseMspdi(xml: string): MspdiParseResult {
       const calUid = String(raw.CalendarUID);
       if (calUid !== '' && calUid !== '-1') parsedTask.calendarId = calUid;
     }
+    if (String(raw.IgnoreResourceCalendar ?? '0') === '1') parsedTask.ignoreResourceCalendar = true;
     if (constraint !== undefined) parsedTask.constraint = constraint;
     if (raw.Deadline !== undefined) {
       const dl = parseMspdiDate(String(raw.Deadline));
       if (!Number.isNaN(dl.getTime())) parsedTask.deadline = dl;
     }
-    // ADR-007: IsNull=1 in MSPDI marks a task with no committed dates.
-    // Map to our unscheduled flag. MS Project uses this for manually-scheduled
-    // tasks with absent Start/Finish (provisional-sum / PC-item scenario).
-    if (String(raw.IsNull ?? '0') === '1') {
+    // Progress actuals (parity row 6). They only reschedule when the project
+    // has a status date. MS Project writes RemainingDuration on every task, so
+    // keep it only where it carries information: in-progress tasks.
+    for (const [field, key] of [
+      ['ActualStart', 'actualStart'],
+      ['ActualFinish', 'actualFinish'],
+    ] as const) {
+      if (raw[field] === undefined) continue;
+      const v = parseMspdiDate(String(raw[field]));
+      if (!Number.isNaN(v.getTime())) parsedTask[key] = v;
+    }
+    // MS Project writes 0 on every task: keep only a reading.
+    const physical = Number(raw.PhysicalPercentComplete ?? 0);
+    if (Number.isFinite(physical) && physical > 0) {
+      // Whole percent, as serialize writes and MS Project stores.
+      parsedTask.physicalProgress = Math.min(100, Math.round(physical));
+      if (physical > 100) {
+        droppedFields.push({
+          path: `${taskPath}.PhysicalPercentComplete`,
+          value: `${String(raw.PhysicalPercentComplete)} clamped to 100`,
+          reason: 'unsupported-element',
+        });
+      }
+    }
+    // MS Project (and our export) hold Duration = ActualDuration +
+    // RemainingDuration, with % complete their ratio as a whole percent. Where
+    // a started task's file says so, read the exact ratio: the whole percent
+    // would move the remaining work by up to 0.5% of the duration, and each
+    // round trip would move it again.
+    const pct = Number(raw.PercentComplete ?? 0);
+    const actualDuration =
+      raw.ActualDuration !== undefined ? parseMspdiDuration(String(raw.ActualDuration)) : NaN;
+    const remainingDuration =
+      raw.RemainingDuration !== undefined ? parseMspdiDuration(String(raw.RemainingDuration)) : NaN;
+    const exact = (actualDuration / duration) * 100;
+    if (
+      taskType !== 'summary' &&
+      pct > 0 &&
+      pct < 100 &&
+      actualDuration > 0 &&
+      remainingDuration > 0 &&
+      Math.abs(actualDuration + remainingDuration - duration) <= 1 &&
+      Math.abs(exact - pct) < 1
+    ) {
+      parsedTask.progress = exact;
+    } else if (raw.RemainingDuration !== undefined && pct > 0 && pct < 100) {
+      // Kept only where it says more than the % share: MS Project (and our
+      // own export) write the share on every task, and keeping it would pin
+      // the remaining work against later % edits.
+      if (Math.abs(remainingDuration - Math.round(duration * (1 - pct / 100))) > 1) {
+        parsedTask.remainingDuration = remainingDuration;
+      }
+    }
+    // Elapsed duration formats (MPXJ): em/eh/ed/ew/emo and their estimated
+    // variants. `Duration` is already wall-clock hours (3ed = PT72H).
+    // Not on summaries: their duration is derived from the children.
+    if (taskType !== 'summary' && ELAPSED_FORMATS.has(Number(raw.DurationFormat))) {
+      parsedTask.durationElapsed = true;
+    }
+    // ADR-007: a task with no committed dates. Ours: a manual task with text
+    // in place of its start and finish ("TBD"), which MS Project keeps when
+    // it saves, adding placeholder dates (desktop run 11). Also a manual task
+    // with no dates at all, and, in older files, a named IsNull task.
+    const manual = String(raw.Manual ?? '0') === '1';
+    const textDated = manual && hasText(raw.StartText) && hasText(raw.FinishText);
+    const manualNoDates =
+      manual &&
+      raw.Start === undefined &&
+      raw.Finish === undefined &&
+      raw.ManualStart === undefined &&
+      raw.ManualFinish === undefined;
+    if (textDated || manualNoDates || String(raw.IsNull ?? '0') === '1') {
       parsedTask.unscheduled = true;
     }
+
+    // Local custom-field values → Task.extra[key], keyed by the project-level
+    // definition's alias. A lookup value (ValueGUID, no Value) or a value with
+    // no matching definition is reported, never guessed onto extra.
+    const rawTaskEa = raw.ExtendedAttribute as unknown[] | undefined;
+    for (const ea of Array.isArray(rawTaskEa) ? rawTaskEa : rawTaskEa ? [rawTaskEa] : []) {
+      const e = ea as Record<string, unknown>;
+      const fid = Number(e?.FieldID);
+      if (OUTLINE_CODE_FIELD_BY_ID.has(fid)) {
+        // An outline-code value carried as an ExtendedAttribute (text or ValueGUID).
+        const oc = outlineCodeByFieldId.get(fid);
+        // ValueGUID first (Project 2007+), then the text.
+        const value =
+          oc?.byGuid.get(String(e?.ValueGUID ?? '').toUpperCase()) ??
+          (e?.Value !== undefined ? String(e.Value) : undefined);
+        if (oc && value !== undefined && value !== '') {
+          parsedTask.codes = { ...(parsedTask.codes ?? {}), [oc.id]: value };
+          // Free text not in the table: keep codeTypes consistent with codes.
+          if (!oc.type.values.some((v) => v.value === value)) oc.type.values.push({ value });
+        } else {
+          droppedFields.push({
+            path: `${taskPath}.ExtendedAttribute[${fid}]`,
+            value: `outline-code value ${String(e?.Value ?? e?.ValueGUID ?? '')} — unresolved`,
+            reason: 'lossy-on-roundtrip',
+          });
+        }
+        continue;
+      }
+      if (e?.Value === undefined) {
+        droppedFields.push({
+          path: `${taskPath}.ExtendedAttribute[${Number.isFinite(fid) ? fid : '?'}]`,
+          value:
+            e?.ValueGUID !== undefined
+              ? 'lookup value (ValueGUID) — unresolved'
+              : 'malformed ExtendedAttribute (no Value)',
+          reason: 'lossy-on-roundtrip',
+        });
+        continue;
+      }
+      const key = eaDefKeyByFieldId.get(fid);
+      if (key === undefined) {
+        droppedFields.push({
+          path: `${taskPath}.ExtendedAttribute[${Number.isFinite(fid) ? fid : '?'}]`,
+          value: String(e.Value),
+          reason: 'unsupported-element',
+        });
+        continue;
+      }
+      parsedTask.extra = { ...(parsedTask.extra ?? {}), [key]: String(e.Value) };
+    }
+
+    // Outline-code values → Task.codes[codeTypeId]. ValueGUID first (Project
+    // 2007+ ignores ValueID), then ValueID (MPXJ, Project 2003).
+    for (const o of asList(raw.OutlineCode)) {
+      const fid = Number(o?.FieldID);
+      const oc = outlineCodeByFieldId.get(fid);
+      const value =
+        oc?.byGuid.get(String(o?.ValueGUID ?? '').toUpperCase()) ??
+        oc?.byValueId.get(String(o?.ValueID ?? ''));
+      if (oc && value !== undefined) {
+        parsedTask.codes = { ...(parsedTask.codes ?? {}), [oc.id]: value };
+        continue;
+      }
+      droppedFields.push({
+        path: `${taskPath}.OutlineCode[${Number.isFinite(fid) ? fid : '?'}]`,
+        value: oc
+          ? o?.ValueGUID === undefined && o?.ValueID === undefined
+            ? 'no ValueID / ValueGUID (an empty placeholder)'
+            : `value ${String(o?.ValueGUID ?? o?.ValueID)} is not in the lookup table`
+          : 'no task outline-code definition for this FieldID',
+        reason: 'lossy-on-roundtrip',
+      });
+    }
+
     tasks.push(parsedTask);
 
     outlineStack[outlineLevel - 1] = uid;
@@ -349,19 +601,36 @@ export function parseMspdi(xml: string): MspdiParseResult {
       const link = preds[p] as Record<string, unknown>;
       const srcUid = String(link.PredecessorUID ?? '');
       if (!srcUid) continue;
+      if (skippedSummaryUids.has(srcUid)) {
+        droppedFields.push({
+          path: `${taskPath}.PredecessorLink[${p}]`,
+          value: `predecessor UID ${srcUid} is a skipped row (project summary or blank)`,
+          reason: 'unsupported-element',
+        });
+        continue;
+      }
 
       const mspdiType = Number(link.Type ?? '1');
       const linkType: DependencyType = mspdiTypeToDependencyType(mspdiType);
-      const lagTenthsOfMinute = Number(link.LinkLag ?? '0');
-      const lagMinutes = Math.round(lagTenthsOfMinute / 10);
-
-      links.push({
+      // LinkLag is tenths of a minute — except for percent LagFormats (19 %,
+      // 20 e%), where it's the percentage itself (MPXJ 16.4 reader + writer,
+      // Aspose TaskLink docs). Elapsed formats: 4 em, 6 eh, 8 ed, 10 ew,
+      // 12 emo, 20 e%. Spec: 2026-10-16-percent-elapsed-lag-design.md.
+      const rawLag = Number(link.LinkLag ?? '0');
+      const lagFormat = Number(link.LagFormat ?? '7');
+      // MPXJ 16.4 reader: 51/52 are the "estimated" %/e%; 36–44 estimated em…emo.
+      const isPercent = [19, 20, 51, 52].includes(lagFormat);
+      const isElapsed = ELAPSED_FORMATS.has(lagFormat) || lagFormat === 20 || lagFormat === 52; // + e%
+      const parsedLink: Link = {
         id: `${srcUid}-${uid}-${p}`,
         source: srcUid,
         target: uid,
         type: linkType,
-        lag: lagMinutes,
-      });
+        lag: isPercent ? 0 : Math.round(rawLag / 10),
+      };
+      if (isPercent) parsedLink.lagPercent = rawLag;
+      if (isElapsed) parsedLink.lagElapsed = true;
+      links.push(parsedLink);
 
       // Capture any unknown fields on the predecessor link.
       for (const k of Object.keys(link)) {
@@ -427,6 +696,9 @@ export function parseMspdi(xml: string): MspdiParseResult {
     // Scan the task-level fields we don't know about.
     for (const [key, value] of Object.entries(raw)) {
       if (KNOWN_TASK_FIELDS.has(key)) continue;
+      // Text dates: empty in MS Project's saves, or what marks an unscheduled
+      // task. Text on a dated task is reported.
+      if (TEXT_DATE_FIELDS.has(key) && (value === '' || parsedTask.unscheduled)) continue;
       droppedFields.push({
         path: `${taskPath}.${key}`,
         value: stringifyForDiag(value),
@@ -460,6 +732,16 @@ export function parseMspdi(xml: string): MspdiParseResult {
   if (Array.isArray(rawResources)) {
     for (let i = 0; i < rawResources.length; i++) {
       const raw = rawResources[i] as Record<string, unknown>;
+      // MS Project writes a nameless UID 0 resource into every file: its
+      // internal "unassigned" placeholder, not a resource the host should see.
+      if (String(raw.UID ?? '') === '0' && String(raw.Name ?? '').trim() === '') {
+        droppedFields.push({
+          path: `Project.Resources.Resource[${i}]`,
+          value: 'placeholder resource (UID 0) skipped',
+          reason: 'unsupported-element',
+        });
+        continue;
+      }
       resources.push(parseMspdiResource(raw, `Project.Resources.Resource[${i}]`, droppedFields));
     }
   }
@@ -479,11 +761,70 @@ export function parseMspdi(xml: string): MspdiParseResult {
     }
   }
 
-  // Pick a sensible defaultCalendarId. Prefer the first calendar with
-  // `IsBaseCalendar` 1; fall back to the first calendar; fall back to 'std'.
+  // Reference consistency — the mirror of serializeMspdi's dangling-ref policy,
+  // so a parse → serialize round-trip of a real MS Project file is clean:
+  //  - unassigned-task placeholders (ResourceUID -65535, MS Project's "no
+  //    resource" sentinel) are skipped, reported once in total;
+  //  - an assignment whose task or resource isn't in the file (incl. the
+  //    skipped project-summary row) is dropped + reported;
+  //  - a task/resource calendarId naming no calendar in the file is cleared +
+  //    reported (the entity falls back to the project default).
+  const calendarIds = new Set(calendars.map((c) => String(c.id)));
+  for (const t of tasks) {
+    if (t.calendarId !== undefined && !calendarIds.has(String(t.calendarId))) {
+      droppedFields.push({
+        path: `Project.Tasks.Task[UID=${String(t.id)}].CalendarUID`,
+        value: `calendar "${String(t.calendarId)}" is not in the file`,
+        reason: 'unsupported-element',
+      });
+      delete t.calendarId;
+    }
+  }
+  for (const r of resources) {
+    if (r.calendarId !== undefined && !calendarIds.has(String(r.calendarId))) {
+      droppedFields.push({
+        path: `Project.Resources.Resource[UID=${String(r.id)}].CalendarUID`,
+        value: `calendar "${String(r.calendarId)}" is not in the file`,
+        reason: 'unsupported-element',
+      });
+      delete r.calendarId;
+    }
+  }
+  const taskIds = new Set(tasks.map((t) => String(t.id)));
+  const resourceIds = new Set(resources.map((r) => String(r.id)));
+  let placeholderAssignments = 0;
+  const consistentAssignments = assignments.filter((a, i) => {
+    if (a.resourceId === UNASSIGNED_RESOURCE_UID) {
+      placeholderAssignments++;
+      return false;
+    }
+    if (taskIds.has(String(a.taskId)) && resourceIds.has(String(a.resourceId))) return true;
+    droppedFields.push({
+      path: `Project.Assignments.Assignment[${i}]`,
+      value: `assignment "${String(a.id)}" references task "${String(a.taskId)}" / resource "${String(a.resourceId)}" not in the file`,
+      reason: 'unsupported-element',
+    });
+    return false;
+  });
+  if (placeholderAssignments > 0) {
+    droppedFields.push({
+      path: 'Project.Assignments',
+      value: `${placeholderAssignments} unassigned-task placeholder assignment(s) (ResourceUID ${UNASSIGNED_RESOURCE_UID}) skipped`,
+      reason: 'unsupported-element',
+    });
+  }
+  assignments.length = 0;
+  assignments.push(...consistentAssignments);
+
+  // The project calendar: `<CalendarUID>` on the root when it names a parsed
+  // calendar (MS Project always writes it). Otherwise the first base calendar;
+  // then the first calendar; then 'std'.
   let defaultCalendarId = 'std';
   const firstCalendar = calendars[0];
-  if (firstCalendar) {
+  const rootCalUid = root.CalendarUID !== undefined ? String(root.CalendarUID) : undefined;
+  if (rootCalUid !== undefined && calendars.some((c) => String(c.id) === rootCalUid)) {
+    defaultCalendarId = rootCalUid;
+  } else if (firstCalendar) {
     const firstBase = calendars.find((c) => c.baseCalendarId === undefined);
     defaultCalendarId = String((firstBase ?? firstCalendar).id);
   }
@@ -513,8 +854,128 @@ export function parseMspdi(xml: string): MspdiParseResult {
     baselines,
     assignments,
   };
+  if (codeTypes.length > 0) project.codeTypes = codeTypes;
+  if (root.StatusDate !== undefined) {
+    const sd = parseMspdiDate(String(root.StatusDate));
+    if (!Number.isNaN(sd.getTime())) project.statusDate = sd;
+  }
 
   return { project, droppedFields };
+}
+
+interface ParsedOutlineCode {
+  /** The code type id (= its name): Task.codes key. */
+  id: string;
+  /** ValueID → full value text. */
+  byValueId: Map<string, string>;
+  /** Value FieldGUID (uppercase) → full value text. */
+  byGuid: Map<string, string>;
+  /** The CodeType itself: free-text values (no table entry) are added to it. */
+  type: CodeType;
+}
+
+const asList = (v: unknown): Record<string, unknown>[] =>
+  (Array.isArray(v) ? v : v !== undefined && v !== null && v !== '' ? [v] : []) as Record<
+    string,
+    unknown
+  >[];
+
+/**
+ * Project <OutlineCodes> → code types. Each task outline code (Outline
+ * Code1..10, by FieldID or by its Guid = a paired definition's Ltuid) becomes
+ * a CodeType named by the paired ExtendedAttribute's Alias, else its own
+ * Alias / FieldName. Hierarchical values flatten to their full path, joined by
+ * each level's mask separator — the text MS Project shows in the cell.
+ */
+function parseOutlineCodes(
+  raw: Record<string, unknown> | undefined,
+  aliasByFieldId: ReadonlyMap<number, string>,
+  fieldIdByLtuid: ReadonlyMap<string, number>,
+  droppedFields: DroppedField[],
+): { codeTypes: CodeType[]; outlineCodeByFieldId: Map<number, ParsedOutlineCode> } {
+  const codeTypes: CodeType[] = [];
+  const outlineCodeByFieldId = new Map<number, ParsedOutlineCode>();
+  for (const [i, def] of asList(raw?.OutlineCode).entries()) {
+    const path = `Project.OutlineCodes.OutlineCode[${i}]`;
+    // An empty <FieldID/> is absent (Number('') is 0): pair by Guid instead.
+    const byFieldId =
+      def.FieldID !== undefined && String(def.FieldID) !== '' ? Number(def.FieldID) : Number.NaN;
+    const fid = Number.isFinite(byFieldId)
+      ? byFieldId
+      : fieldIdByLtuid.get(String(def.Guid ?? '').toUpperCase());
+    const field = fid === undefined ? undefined : OUTLINE_CODE_FIELD_BY_ID.get(fid);
+    if (fid === undefined || field === undefined) {
+      droppedFields.push({
+        path,
+        value: `lookup table for FieldID ${String(def.FieldID ?? def.Guid ?? '?')} (not a task Outline Code1–10) not read`,
+        reason: 'unsupported-element',
+      });
+      continue;
+    }
+    const nonEmpty = (v: unknown) => (v !== undefined && String(v) !== '' ? String(v) : undefined);
+    const name =
+      aliasByFieldId.get(fid) ??
+      nonEmpty(def.Alias) ??
+      nonEmpty(def.FieldName) ??
+      `Outline Code${field}`;
+    if (outlineCodeByFieldId.has(fid) || codeTypes.some((c) => c.id === name)) {
+      droppedFields.push({
+        path,
+        value: `outline code "${name}" (FieldID ${fid}) ignored: already defined (first wins)`,
+        reason: 'unsupported-element',
+      });
+      continue;
+    }
+    const separators = new Map<number, string>();
+    for (const m of asList((def.Masks as Record<string, unknown> | undefined)?.Mask)) {
+      const level = Number(m.Level);
+      if (Number.isFinite(level)) separators.set(level, String(m.Separator ?? '.'));
+    }
+    const nodes = asList((def.Values as Record<string, unknown> | undefined)?.Value).map(
+      (v, k) => ({
+        key: v.ValueID !== undefined ? String(v.ValueID) : `#${k}`,
+        parent: v.ParentValueID !== undefined ? String(v.ParentValueID) : '0',
+        text: v.Value !== undefined ? String(v.Value) : '',
+        description: nonEmpty(v.Description),
+        guid: v.FieldGUID !== undefined ? String(v.FieldGUID).toUpperCase() : undefined,
+      }),
+    );
+    const byKey = new Map(nodes.map((n) => [n.key, n]));
+    const fullPath = (n: (typeof nodes)[number]): string => {
+      // Walk up to the root; a parent cycle stops at the first repeat.
+      const chain = [n];
+      const seen = new Set([n.key]);
+      for (let p = byKey.get(n.parent); p && !seen.has(p.key); p = byKey.get(p.parent)) {
+        chain.unshift(p);
+        seen.add(p.key);
+      }
+      return chain
+        .map((c, level) => (level === 0 ? c.text : `${separators.get(level) ?? '.'}${c.text}`))
+        .join('');
+    };
+    const values: CodeType['values'] = [];
+    const type: CodeType = { id: name, name, values };
+    const oc: ParsedOutlineCode = { id: name, byValueId: new Map(), byGuid: new Map(), type };
+    for (const n of nodes) {
+      if (n.text === '') continue;
+      const text = fullPath(n);
+      oc.byValueId.set(n.key, text);
+      if (n.guid) oc.byGuid.set(n.guid, text);
+      if (values.some((v) => v.value === text)) continue;
+      values.push(n.description ? { value: text, description: n.description } : { value: text });
+    }
+    outlineCodeByFieldId.set(fid, oc);
+    codeTypes.push(type);
+  }
+  // An alias definition with no lookup table (a third-party writer): its text
+  // values still read, into a code type with no table.
+  for (const [fid, alias] of aliasByFieldId) {
+    if (outlineCodeByFieldId.has(fid) || codeTypes.some((c) => c.id === alias)) continue;
+    const type: CodeType = { id: alias, name: alias, values: [] };
+    outlineCodeByFieldId.set(fid, { id: alias, byValueId: new Map(), byGuid: new Map(), type });
+    codeTypes.push(type);
+  }
+  return { codeTypes, outlineCodeByFieldId };
 }
 
 const KNOWN_CALENDAR_FIELDS = new Set([
@@ -739,6 +1200,10 @@ function parseMspdiCalendar(
   const weekDays: unknown[] =
     ((raw.WeekDays as Record<string, unknown> | undefined)?.WeekDay as unknown[] | undefined) ?? [];
 
+  // Recurring weekdays the file lists. A derived calendar omits the ones it
+  // inherits from its base — those become `inheritedDays`, not non-working.
+  const listedDays = new Set<DayOfWeek>();
+
   if (Array.isArray(weekDays)) {
     for (let i = 0; i < weekDays.length; i++) {
       const wd = weekDays[i] as Record<string, unknown>;
@@ -750,6 +1215,7 @@ function parseMspdiCalendar(
         // Recurring weekday — DayType 1=Sun ... 7=Sat → DayOfWeek 0=Sun ... 6=Sat
         const dayOfWeek = (dayType - 1) as DayOfWeek;
         workWeek[dayOfWeek] = dayWorking ? parseWorkingTimes(wd) : [];
+        listedDays.add(dayOfWeek);
       } else if (dayType === 0) {
         // Legacy exception entry: a DayType=0 WeekDay with a TimePeriod range.
         // FromDate..ToDate can span multiple days (Christmas shutdown) — expand
@@ -858,6 +1324,9 @@ function parseMspdiCalendar(
   const baseUid = raw.BaseCalendarUID !== undefined ? String(raw.BaseCalendarUID) : undefined;
   if (baseUid !== undefined && baseUid !== '-1') {
     calendar.baseCalendarId = baseUid;
+    calendar.inheritedDays = ([0, 1, 2, 3, 4, 5, 6] as DayOfWeek[]).filter(
+      (d) => !listedDays.has(d),
+    );
   }
 
   return calendar;

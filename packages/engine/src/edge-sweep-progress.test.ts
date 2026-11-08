@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { schedule } from './schedule';
 import { topologicalSort } from './topological-sort';
-import type { Calendar, Link, Project, Task } from './types';
+import type { Calendar, Link, Project, Task, TaskComputed } from './types';
 
-// Edge-case sweep, part 2: loop reporting. Same conventions
+// Edge-case sweep, part 2: progress modes and loop reporting. Same conventions
 // as edge-sweep.test.ts (PASS / BY-DESIGN / DEFECT via `it.fails`).
 
 const DAY = 540;
@@ -14,6 +14,7 @@ const std: Calendar = {
   exceptions: [],
 };
 const MON = new Date(2026, 0, 5, 8);
+const d = (day: number, h = 8, m = 0) => new Date(2026, 0, day, h, m);
 const t = (id: string, days: number, extra: Partial<Task> = {}): Task => ({
   id,
   text: id,
@@ -41,8 +42,85 @@ const project = (tasks: Task[], links: Link[] = [], extra: Partial<Project> = {}
   calendars: [std],
   baselines: [],
   assignments: [],
+  // Forecast from the status date (the P6 opt-in): the modes differ only there.
+  rescheduleAfterStatusDate: true,
   ...extra,
 });
+const MODES = [undefined, 'retained-logic', 'progress-override'] as const;
+/** The scheduling-relevant part of computed (status fields only appear with a status date). */
+const dates = (c: TaskComputed | undefined) => ({
+  earlyStart: c?.earlyStart,
+  earlyFinish: c?.earlyFinish,
+  lateStart: c?.lateStart,
+  lateFinish: c?.lateFinish,
+  totalSlack: c?.totalSlack,
+  freeSlack: c?.freeSlack,
+  isCritical: c?.isCritical,
+});
+const datesById = (p: Project) =>
+  Object.fromEntries(schedule(p).tasks.map((x) => [x.id, dates(x.computed)]));
+
+// A chain with an unfinished SS / FF mix, so logic matters.
+const chain = () => [t('a', 2), t('b', 3), t('c', 2), t('e', 4)];
+const chainLinks = [link('a', 'b'), link('b', 'c'), link('a', 'e', 'SS'), link('e', 'c', 'FF')];
+
+describe('edge sweep: progress modes', () => {
+  it('with no status date, every progress mode equals the plain pass (progress is cosmetic)', () => {
+    const tasks = chain().map((x) => (x.id === 'b' ? { ...x, progress: 40 } : x));
+    const plain = datesById(project(tasks, chainLinks));
+    for (const mode of MODES) {
+      expect(datesById(project(tasks, chainLinks, { progressMode: mode }))).toEqual(plain);
+    }
+  });
+
+  it('with a status date but no actuals, every progress mode equals the plain pass', () => {
+    const plain = datesById(project(chain(), chainLinks));
+    for (const mode of MODES) {
+      const p = project(chain(), chainLinks, { progressMode: mode, statusDate: MON });
+      expect(datesById(p)).toEqual(plain);
+    }
+  });
+
+  it('finished work pins to its actual dates in every mode', () => {
+    // Planned 2 days; it actually ran Mon 08:00 → Thu 12:00.
+    const done = t('a', 2, { progress: 100, actualStart: d(5), actualFinish: d(8, 12) });
+    for (const mode of MODES) {
+      const p = project([done, t('b', 1)], [link('a', 'b')], {
+        progressMode: mode,
+        statusDate: d(12),
+      });
+      const a = schedule(p).tasks.find((x) => x.id === 'a')?.computed;
+      expect(a?.status).toBe('complete');
+      expect(a?.earlyStart).toEqual(d(5));
+      expect(a?.earlyFinish).toEqual(d(8, 12));
+      expect(a?.isCritical).toBe(false);
+    }
+  });
+
+  it('successors of in-sequence progress get identical logic-driven dates in every mode', () => {
+    // a done, b under way after a finished (in sequence), c / e not started.
+    const tasks = [
+      t('a', 2, { progress: 100, actualStart: d(5), actualFinish: d(6, 17) }),
+      t('b', 3, { progress: 50, actualStart: d(7) }),
+      t('c', 2),
+      t('e', 4),
+    ];
+    const results = MODES.map((mode) =>
+      datesById(project(tasks, chainLinks, { progressMode: mode, statusDate: d(9) })),
+    );
+    for (const r of results) {
+      expect(r.c).toEqual(results[0]?.c);
+      expect(r.e).toEqual(results[0]?.e);
+    }
+    // And they are logic-driven: e is floored at the status date, c finishes
+    // with e (FF) and starts no earlier than b's remaining work allows (FS).
+    const r = results[0];
+    expect(r?.e?.earlyStart).toEqual(d(9));
+    expect(r?.c?.earlyFinish).toEqual(r?.e?.earlyFinish);
+    expect(r?.c?.earlyStart?.getTime()).toBeGreaterThanOrEqual(r?.b?.earlyFinish?.getTime() ?? 0);
+  });
+});
+
 describe('edge sweep: loops', () => {
   // Was a DEFECT: topologicalSort threw one generic "Link graph contains a
   // cycle" with no task ids. Now (P6 "circular relationships") every loop's

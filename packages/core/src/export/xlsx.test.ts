@@ -135,6 +135,26 @@ describe('exportXLSX — Blob roundtrip', () => {
     expect(firstSheet[2][0]).toBe('b');
   });
 
+  test('whole programme by default; scope "visible" exports the screen filter (coord 2026-10-16)', async () => {
+    const p = schedule(project([task('a', 540), task('b', 1080), task('c', 540)]));
+    const ids = async (scope?: 'visible' | 'all') =>
+      (
+        await readBlobToAoa(
+          await exportXLSX({
+            scheduled: p,
+            visibleTaskIds: new Set(['a', 'c']),
+            options: scope ? { scope } : {},
+          }),
+        )
+      ).firstSheet
+        .slice(1)
+        .map((r) => r[0]);
+    // A filtered .xlsx opened later reads as "the programme": never truncate silently.
+    expect(await ids()).toEqual(['a', 'b', 'c']);
+    expect(await ids('all')).toEqual(['a', 'b', 'c']);
+    expect(await ids('visible')).toEqual(['a', 'c']);
+  });
+
   test('respects a custom sheetName', async () => {
     const p = schedule(project([task('a', 540)]));
 

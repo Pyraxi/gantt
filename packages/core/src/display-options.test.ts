@@ -13,6 +13,8 @@ describe('displayOptions state', () => {
       critical: true,
       slack: true,
       deadline: true,
+      badges: true,
+      previousStarts: true,
     });
   });
   test('init honors provided defaults', () => {
@@ -21,6 +23,8 @@ describe('displayOptions state', () => {
       critical: true,
       slack: false,
       deadline: true,
+      badges: true,
+      previousStarts: true,
     });
   });
   test('toggleColumn adds then removes an id', () => {

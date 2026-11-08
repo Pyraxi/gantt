@@ -4,6 +4,7 @@ import type { Project, Task } from '@pyraxi/cpm-engine';
 import { cleanup, render } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { Gantt } from './Gantt.js';
+import { visibleRowOrder } from './grid-keyboard.js';
 import { reRootOrphans } from './visible-tree.js';
 
 afterEach(cleanup);
@@ -46,6 +47,24 @@ const project: Project = {
 };
 
 describe('reRootOrphans', () => {
+  test('a whole tree: order is depth-first, a re-rooted row never before its new parent', () => {
+    // S > (G > (c, g2), a), P > (x), y — G and P filtered out.
+    const all = [
+      t('S', { type: 'summary' }),
+      t('G', { type: 'summary', parent: 'S' }),
+      t('c', { parent: 'G' }),
+      t('g2', { parent: 'G' }),
+      t('a', { parent: 'S' }),
+      t('P', { type: 'summary' }),
+      t('x', { parent: 'P' }),
+      t('y'),
+    ];
+    const shown = reRootOrphans(
+      all.filter((x) => !['G', 'P'].includes(String(x.id))),
+      all,
+    );
+    expect(visibleRowOrder(shown, () => true)).toEqual(['S', 'c', 'g2', 'a', 'x', 'y']);
+  });
   test('a visible self-parented task re-roots to the top level', () => {
     const selfish = [t('A', { parent: 'A' }), t('z')];
     expect(reRootOrphans(selfish, selfish).map((x) => [x.id, x.parent])).toEqual([

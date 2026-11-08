@@ -3,11 +3,17 @@ export interface DisplayOptionsState {
   critical: boolean;
   slack: boolean;
   deadline: boolean;
+  /** Host task badges (`taskBadges`). */
+  badges: boolean;
+  /** Previous-start markers (`previousStart`). */
+  previousStarts: boolean;
 }
+
+export type DisplayOptionsSignal = 'critical' | 'slack' | 'deadline' | 'badges' | 'previousStarts';
 
 export type DisplayOptionsAction =
   | { kind: 'toggleColumn'; id: string }
-  | { kind: 'toggleSignal'; signal: 'critical' | 'slack' | 'deadline' };
+  | { kind: 'toggleSignal'; signal: DisplayOptionsSignal };
 
 export const TOGGLEABLE_COLUMN_IDS = [
   'start',
@@ -22,12 +28,16 @@ export function initDisplayOptions(defaults?: {
   critical?: boolean;
   slack?: boolean;
   deadline?: boolean;
+  badges?: boolean;
+  previousStarts?: boolean;
 }): DisplayOptionsState {
   return {
     hiddenColumns: defaults?.hiddenColumns ?? [],
     critical: defaults?.critical ?? true,
     slack: defaults?.slack ?? true,
     deadline: defaults?.deadline ?? true,
+    badges: defaults?.badges ?? true,
+    previousStarts: defaults?.previousStarts ?? true,
   };
 }
 
