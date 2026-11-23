@@ -1,5 +1,11 @@
 # construction-gantt
 
+## 1.8.1
+
+### Patch Changes
+
+- 2c78f94: A double-click on a grid row near the bottom of the window opens that row's task. SVAR's grid focused its table on every mousedown without `preventScroll`. When the gantt ran past the viewport (in the page flow, or taller than the window), the page scrolled between the two clicks, so the second one landed on a lower row and `onTaskEditRequest` reported that task. The grid now focuses without scrolling the page. The same jump stopped click-to-edit cells near the bottom edge from opening, because mousedown and mouseup landed on different rows; they open now too.
+
 ## 1.8.0
 
 ### Minor Changes

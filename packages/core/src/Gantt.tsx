@@ -1586,6 +1586,21 @@ export const Gantt = forwardRef<GanttHandle, GanttProps>(function Gantt(
     };
   }, [editMode, gridClipboard]);
 
+  // SVAR's grid focuses its table box on every mousedown, without
+  // preventScroll. When the box runs past the viewport (a gantt in the page
+  // flow, or one taller than the window), the browser scrolls the page between
+  // the two clicks of a double-click, so the second lands on another row and
+  // opens that task's editor (CM, 2026-11-09). Capture runs before SVAR's
+  // handler, so its focus call gets preventScroll. Pinned to
+  // @svar-ui/react-grid 2.6.1 (dist ~line 1324, the body's onMouseDown):
+  // re-check on an SVAR upgrade.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.addEventListener('mousedown', focusGridWithoutScroll, true);
+    return () => el.removeEventListener('mousedown', focusGridWithoutScroll, true);
+  }, []);
+
   /** Scroll SVAR's chart so row `index` (in visible order) is inside the rows viewport. */
   function scrollRowIntoView(api: IApi, fromCell: Element, index: number) {
     const state = api.getState() as { scrollTop?: number; cellHeight?: number };
@@ -2869,6 +2884,17 @@ export function isColumnEditable(col: GanttColumn, editMode: boolean): boolean {
  */
 function stopToGrid(e: { stopPropagation(): void }) {
   e.stopPropagation();
+}
+
+const noScrollBoxes = new WeakSet<HTMLElement>();
+
+/** Mousedown capture: the grid table box under the pointer focuses with preventScroll. */
+function focusGridWithoutScroll(e: Event) {
+  const box = e.target instanceof Element ? e.target.closest('.wx-table-box') : null;
+  if (!(box instanceof HTMLElement) || noScrollBoxes.has(box)) return;
+  noScrollBoxes.add(box);
+  box.focus = (options?: FocusOptions) =>
+    HTMLElement.prototype.focus.call(box, { ...options, preventScroll: true });
 }
 
 const guardedEditors = new WeakSet<HTMLElement>();
